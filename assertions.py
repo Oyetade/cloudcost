@@ -68,18 +68,21 @@ def report_anti_join(
     }
 
 
-def assert_gate_complete(gated: pd.DataFrame, context: str) -> None:
-    """The run_status gate (7.3): every row entering training must sit on a
-    (run_date, subscription) slice where Cost, Usage AND Attribution all read
-    Complete. This asserts the gate column is all-True after filtering; a
-    False slipping through means the filter was applied wrongly.
+def assert_no_failed_gate(gated: pd.DataFrame, context: str) -> None:
+    """The run_status gate is three-state (section 5.7): gated_complete,
+    gated_failed, ungated. Rows that FAILED verification (a load on/after the
+    run_status era with no Complete record) must never survive into a frame.
+    ungated rows (before the era, no run_status to check) are allowed through
+    deliberately and carry their own label. This asserts no gated_failed row
+    slipped past the filter.
     """
-    if "gate_complete" not in gated.columns:
-        raise DataQualityError(f"{context}: gate_complete column missing")
-    if not gated["gate_complete"].all():
-        n = int((~gated["gate_complete"]).sum())
+    if "gate_state" not in gated.columns:
+        raise DataQualityError(f"{context}: gate_state column missing")
+    failed = gated["gate_state"].eq("gated_failed")
+    if failed.any():
         raise DataQualityError(
-            f"{context}: {n} rows passed the gate with gate_complete=False"
+            f"{context}: {int(failed.sum())} gated_failed rows survived the "
+            "gate; verification was applied wrongly"
         )
 
 

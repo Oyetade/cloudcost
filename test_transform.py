@@ -67,8 +67,9 @@ class TestGate:
 
 
 class TestApplyGate:
-    def test_absent_gate_row_is_excluded(self):
-        # frame has a slice with no run_status row => must be filtered out
+    def test_missing_row_inside_era_fails_and_is_excluded(self):
+        # A slice on/after run_status_start with no gate row is unverified
+        # => excluded.
         frame = pd.DataFrame({
             "run_date": [date(2024, 3, 1), date(2024, 3, 2)],
             "subscription_id": ["s", "s"],
@@ -79,9 +80,45 @@ class TestApplyGate:
             "subscription_id": ["s"],
             "gate_complete": [True],
         })
-        kept = T.apply_gate(frame, gate, "ctx")
+        kept = T.apply_gate(frame, gate, "ctx",
+                            run_status_start=date(2024, 1, 2))
         assert len(kept) == 1
-        assert kept["run_date"].iloc[0] == date(2024, 3, 1)
+        assert kept["gate_state"].iloc[0] == "gated_complete"
+
+    def test_missing_row_before_era_is_kept_as_ungated(self):
+        # A slice BEFORE run_status_start with no gate row is not a failure:
+        # run_status did not exist yet => kept, labelled ungated.
+        frame = pd.DataFrame({
+            "run_date": [date(2023, 9, 1)],
+            "subscription_id": ["s"],
+            "cost": [100.0],
+        })
+        gate = pd.DataFrame({
+            "run_date": pd.Series([], dtype="object"),
+            "subscription_id": pd.Series([], dtype="object"),
+            "gate_complete": pd.Series([], dtype="bool"),
+        })
+        kept = T.apply_gate(frame, gate, "ctx",
+                            run_status_start=date(2024, 1, 2))
+        assert len(kept) == 1
+        assert kept["gate_state"].iloc[0] == "ungated"
+
+    def test_failed_row_before_era_still_excluded_if_gate_says_incomplete(self):
+        # If a gate row exists before the era and says incomplete, honour it:
+        # ungated only applies where there is NO row at all.
+        frame = pd.DataFrame({
+            "run_date": [date(2023, 9, 1)],
+            "subscription_id": ["s"],
+            "cost": [100.0],
+        })
+        gate = pd.DataFrame({
+            "run_date": [date(2023, 9, 1)],
+            "subscription_id": ["s"],
+            "gate_complete": [False],
+        })
+        kept = T.apply_gate(frame, gate, "ctx",
+                            run_status_start=date(2024, 1, 2))
+        assert len(kept) == 0  # explicit incomplete => failed, excluded
 
 
 class TestFiveKeyJoin:

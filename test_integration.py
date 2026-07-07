@@ -32,6 +32,10 @@ def snapshot():
              resource_group_name="rg", resource_type="vmss", meter="D64 Spot",
              batch_account_name="a", pool_name="eodpool",
              pre_tax_cost=200.0, usage_quantity=20.0),  # incomplete slice
+        dict(run_date=date(2022, 6, 1), subscription_id="s",
+             resource_group_name="rg", resource_type="vmss", meter="D64 Spot",
+             batch_account_name="a", pool_name="eodpool",
+             pre_tax_cost=50.0, usage_quantity=5.0),  # cost_only regime
     ])
     job_usage = pd.DataFrame([
         dict(run_date=date(2024, 3, 1), subscription_id="s",
@@ -74,11 +78,36 @@ def snapshot():
 
 def test_pool_frame_gates_and_masks(snapshot):
     pool = T.build_pool_frame(snapshot)
-    assert len(pool) == 1                        # 3/2 gated out
-    assert pool["run_date"].iloc[0] == date(2024, 3, 1)
-    assert pool["cost"].iloc[0] == 100.0         # free-tier zero row excluded
-    assert pool["job_seconds"].iloc[0] == 14400.0
+    # 3/2 (incomplete, in-era) is excluded; 3/1 (gated_complete) and
+    # 2022-06 (cost_only, ungated) both survive.
+    assert len(pool) == 2
+    by_date = pool.set_index("run_date")
+
+    # the featured, gated day
+    row_2024 = by_date.loc[date(2024, 3, 1)]
+    assert row_2024["cost"] == 100.0             # free-tier zero row excluded
+    assert row_2024["job_seconds"] == 14400.0
+    assert row_2024["data_regime"] == "featured_gated"
+    assert row_2024["gate_state"] == "gated_complete"
+
+    # the cost-only day: kept, but activity is null BY CONSTRUCTION, not zero
+    row_2022 = by_date.loc[date(2022, 6, 1)]
+    assert row_2022["cost"] == 50.0
+    assert pd.isna(row_2022["job_seconds"])      # never imputed to 0
+    assert row_2022["data_regime"] == "cost_only"
+    assert row_2022["gate_state"] == "ungated"
+
     assert pool.attrs["orphan_report"]["both"] == 2
+
+
+def test_cost_only_activity_is_null_never_zero(snapshot):
+    # The load-bearing distinction: a pre-activity pool-day must not be
+    # imputed to zero activity, which would be indistinguishable from a
+    # featured-era pool that genuinely ran nothing.
+    pool = T.build_pool_frame(snapshot)
+    cost_only = pool[pool["data_regime"] == "cost_only"]
+    assert len(cost_only) == 1
+    assert cost_only["job_seconds"].isna().all()
 
 
 def test_team_frame_keeps_null_distinct(snapshot):

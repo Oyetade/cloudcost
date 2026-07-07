@@ -12,9 +12,16 @@ Reads the Parquet snapshot produced by extract.py. Pure pandas + numpy.
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
+
+# Regime boundaries (section 5.7). Feature availability, not just gate
+# availability, differs across these. Model layer filters on data_regime;
+# the transform only labels.
+ACTIVITY_START = date(2023, 8, 1)   # job_usage / job_cost begin
+RUN_STATUS_START = date(2024, 1, 2)  # run_status begins; gate evaluable
 
 from . import assertions as A
 from . import features as F
@@ -23,6 +30,27 @@ GATE_TYPES = ("Cost", "Usage", "Attribution")
 JOB_KEYS = ["run_date", "subscription_id", "batch_account_name",
             "pool_name", "job_id"]
 POOL_KEYS = ["run_date", "subscription_id", "batch_account_name", "pool_name"]
+
+
+def stamp_regime(frame: pd.DataFrame) -> pd.DataFrame:
+    """Stamp each row with its data_regime (section 5.7), so the model layer
+    can select its own window rather than the transform hardcoding a date.
+
+      cost_only        : before ACTIVITY_START. Cost target only; activity
+                         features are null BY CONSTRUCTION, never imputed.
+      featured_ungated : ACTIVITY_START .. RUN_STATUS_START. Featured, but
+                         no gate could be evaluated.
+      featured_gated   : on/after RUN_STATUS_START. Featured and gated.
+    """
+    rd = pd.to_datetime(frame["run_date"]).dt.date
+    regime = pd.Series("featured_gated", index=frame.index, dtype=object)
+    regime[rd < RUN_STATUS_START] = "featured_ungated"
+    regime[rd < ACTIVITY_START] = "cost_only"
+    frame = frame.copy()
+    frame["data_regime"] = pd.Categorical(
+        regime, categories=["cost_only", "featured_ungated", "featured_gated"]
+    )
+    return frame
 
 
 def load_snapshot(snapshot_dir: str | Path) -> dict[str, pd.DataFrame]:
@@ -72,16 +100,44 @@ def build_gate(run_status: pd.DataFrame) -> pd.DataFrame:
 
 
 def apply_gate(
-    frame: pd.DataFrame, gate: pd.DataFrame, context: str
+    frame: pd.DataFrame, gate: pd.DataFrame, context: str,
+    run_status_start: "date | None" = None,
 ) -> pd.DataFrame:
-    """Left-join the gate onto the full grid so absence counts as failure
-    (an inner join would silently pass missing days through), then keep only
-    complete slices. Absent gate rows => gate_complete NaN => filtered out.
+    """Three-state gate. A missing gate row means two different things
+    depending on when it falls, and conflating them silently discards the
+    pre-run_status history (section 5.7):
+
+      - on/after run_status_start: missing => the load is unverified =>
+        FAIL, exclude the row (an inner join would pass it through silently);
+      - before run_status_start: missing => run_status did not yet exist =>
+        UNGATED, keep the row but mark it so downstream knows it passed no
+        gate.
+
+    Adds a gate_state column with values 'gated_complete', 'gated_failed',
+    'ungated'. Rows with 'gated_failed' are dropped; the other two are kept.
+    If run_status_start is None it is inferred as the gate's own minimum
+    run_date, which is the correct default when the gate is built from the
+    same snapshot.
     """
     merged = frame.merge(gate, on=["run_date", "subscription_id"], how="left")
-    merged["gate_complete"] = merged["gate_complete"].fillna(False)
-    kept = merged[merged["gate_complete"]].copy()
-    A.assert_gate_complete(kept, context)
+
+    if run_status_start is None and len(gate):
+        run_status_start = gate["run_date"].min()
+
+    before_era = (
+        merged["run_date"] < run_status_start
+        if run_status_start is not None
+        else pd.Series(False, index=merged.index)
+    )
+    complete = merged["gate_complete"].fillna(False)
+
+    state = pd.Series("gated_failed", index=merged.index, dtype=object)
+    state[complete] = "gated_complete"
+    state[before_era & merged["gate_complete"].isna()] = "ungated"
+    merged["gate_state"] = state
+
+    kept = merged[merged["gate_state"] != "gated_failed"].copy()
+    A.assert_no_failed_gate(kept, context)
     return kept
 
 
@@ -177,8 +233,14 @@ def build_pool_frame(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
                                  "pool_name"]
     )
 
+    # Left join from the cost target: pre-ACTIVITY_START pool-days get NaN
+    # activity. That NaN is null-BY-CONSTRUCTION (we did not measure), NOT
+    # zero activity (a pool that ran nothing). Never fillna(0) here; the
+    # regime label explains the null and the model layer decides what to do.
     frame = target.merge(activity, on=POOL_KEYS, how="left")
-    frame = apply_gate(frame, gate, "pool_frame")
+    frame = stamp_regime(frame)
+    frame = apply_gate(frame, gate, "pool_frame",
+                       run_status_start=RUN_STATUS_START)
     frame.attrs["orphan_report"] = orphans
     return frame
 
@@ -204,5 +266,9 @@ def build_team_frame(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
         .rename("cost")
         .reset_index()
     )
-    frame = apply_gate(target, gate, "team_frame")
+    # job_cost starts at ACTIVITY_START, so the team frame has no cost_only
+    # regime; it is featured_ungated then featured_gated only.
+    target = stamp_regime(target)
+    frame = apply_gate(target, gate, "team_frame",
+                       run_status_start=RUN_STATUS_START)
     return frame

@@ -81,6 +81,7 @@ class ExtractManifest:
     snapshot: str
     started: str
     rows: dict[str, int] = field(default_factory=dict)
+    density: dict[str, dict] = field(default_factory=dict)
     finished: str | None = None
 
     def write(self, out_dir: Path) -> None:
@@ -116,6 +117,18 @@ def _extract_paged(engine, table: str) -> pd.DataFrame:
     return _apply_dtypes(df)
 
 
+def monthly_density(df: pd.DataFrame, date_col: str = "run_date") -> dict:
+    """Row count per calendar month. Confirms whether a table's round start
+    year (raw_cost 'from 2021', retail prices 'from 2017') is continuous
+    coverage or a thin backfilled tail (section 5.7 residual check). Written
+    to the manifest so the coverage claim is verifiable, not assumed.
+    """
+    if date_col not in df.columns or df.empty:
+        return {}
+    m = pd.to_datetime(df[date_col]).dt.to_period("M").astype(str)
+    return m.value_counts().sort_index().to_dict()
+
+
 def run_extract(dsn: str, out_root: str | Path) -> Path:
     """Extract all ten tables to a timestamped Parquet snapshot directory."""
     engine = create_engine(dsn)  # dsn: "postgresql+psycopg://user:pw@host/db"
@@ -135,6 +148,9 @@ def run_extract(dsn: str, out_root: str | Path) -> Path:
         df = _extract_paged(engine, table)
         df.to_parquet(out_dir / f"{table}.parquet", index=False)
         manifest.rows[table] = len(df)
+        # raw_cost's 'from 2021' is the long-tail claim the pool model's
+        # baseline history rests on: record its shape so it is verifiable.
+        manifest.density[table] = monthly_density(df)
 
     manifest.write(out_dir)
     engine.dispose()
