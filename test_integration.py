@@ -35,7 +35,11 @@ def snapshot():
         dict(run_date=date(2022, 6, 1), subscription_id="s",
              resource_group_name="rg", resource_type="vmss", meter="D64 Spot",
              batch_account_name="a", pool_name="eodpool",
-             pre_tax_cost=50.0, usage_quantity=5.0),  # cost_only regime
+             pre_tax_cost=50.0, usage_quantity=5.0),  # pre_coverage (< Aug 22)
+        dict(run_date=date(2022, 10, 1), subscription_id="s",
+             resource_group_name="rg", resource_type="vmss", meter="D64 Spot",
+             batch_account_name="a", pool_name="eodpool",
+             pre_tax_cost=70.0, usage_quantity=7.0),  # cost_only (>= Aug 22)
     ])
     job_usage = pd.DataFrame([
         dict(run_date=date(2024, 3, 1), subscription_id="s",
@@ -76,12 +80,16 @@ def snapshot():
                 job_cost=job_cost, run_status=run_status)
 
 
-def test_pool_frame_gates_and_masks(snapshot):
+def test_pool_frame_gates_masks_and_drops_pre_coverage(snapshot):
     pool = T.build_pool_frame(snapshot)
-    # 3/2 (incomplete, in-era) is excluded; 3/1 (gated_complete) and
-    # 2022-06 (cost_only, ungated) both survive.
+    # 2022-06 (pre_coverage) is dropped; 3/2 (incomplete, in-era) is gated
+    # out; 3/1 (gated_complete) and 2022-10 (cost_only) survive.
     assert len(pool) == 2
     by_date = pool.set_index("run_date")
+
+    # pre_coverage onboarding row must not reach the frame
+    assert date(2022, 6, 1) not in by_date.index
+    assert "pre_coverage" not in set(pool["data_regime"])
 
     # the featured, gated day
     row_2024 = by_date.loc[date(2024, 3, 1)]
@@ -91,8 +99,8 @@ def test_pool_frame_gates_and_masks(snapshot):
     assert row_2024["gate_state"] == "gated_complete"
 
     # the cost-only day: kept, but activity is null BY CONSTRUCTION, not zero
-    row_2022 = by_date.loc[date(2022, 6, 1)]
-    assert row_2022["cost"] == 50.0
+    row_2022 = by_date.loc[date(2022, 10, 1)]
+    assert row_2022["cost"] == 70.0
     assert pd.isna(row_2022["job_seconds"])      # never imputed to 0
     assert row_2022["data_regime"] == "cost_only"
     assert row_2022["gate_state"] == "ungated"

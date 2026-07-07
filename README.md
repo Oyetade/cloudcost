@@ -44,12 +44,23 @@ closes, only the extract predicate changes; nothing downstream moves.
 The two products do not share a training window, and coverage differs
 *within* the pool frame. Every frame is stamped with `data_regime`:
 
-- `cost_only` — before Aug 2023. Cost target only; activity features are
-  null **by construction** and must never be imputed to zero (zero activity
-  is a real value in the featured era and a lie here).
+- `pre_coverage` — before Aug 2022. The raw_cost onboarding ramp: monthly
+  row count and monthly total cost climb together through 2021 and flatten
+  around Aug 2022, so early totals **understate** the true estate. Labelled
+  and then dropped from training frames by `drop_pre_coverage`; kept in the
+  raw extract.
+- `cost_only` — Aug 2022 to Aug 2023. Representative cost target only;
+  activity features are null **by construction** and must never be imputed
+  to zero (zero activity is a real value in the featured era and a lie here).
 - `featured_ungated` — Aug 2023 to Jan 2024. Featured, but run_status did
   not yet exist, so no gate could be evaluated.
 - `featured_gated` — Jan 2024 on. Featured and gated.
+
+Boundaries are single tunables (`COST_HISTORY_START`, `ACTIVITY_START`,
+`RUN_STATUS_START`). The pool cost target is also **non-stationary in
+level** — it peaks in 2023 and settles to a lower plateau after — so
+level-based models should prefer differenced targets or explicit trend
+features; the incumbent 3-month-trend baseline tolerates this by design.
 
 The gate is correspondingly three-state (`gate_state`): a missing run_status
 row means **fail** on/after the run_status era (unverified load, excluded)
@@ -61,7 +72,7 @@ product, so it cannot dishonestly start in 2023 for a gated model.
 
 ## What the tests cover
 
-`pytest tests/` — 48 tests. The ones that matter:
+`pytest tests/` — 51 tests. The ones that matter:
 
 - **Concurrency sweep** — overlap, sequential, instantaneous handover (no
   false peak), independent pools, null-time drop, triple overlap.
@@ -69,7 +80,9 @@ product, so it cannot dishonestly start in 2023 for a gated model.
   type, any unknown status fail safe; latest run per type wins; a missing
   row inside the era fails, before the era is kept as ungated; an explicit
   incomplete before the era still fails.
-- **Regime** — cost_only activity stays null, never zero, end-to-end.
+- **Regime** — all four regimes assigned by boundary, half-open on the
+  left; pre_coverage dropped from frames; cost_only activity stays null,
+  never zero, end-to-end.
 - **Five-key join** — clean join preserves row count; retried job on the
   usage side is caught; duplicate on the cost side does not multiply usage;
   usage orphans get Unknown, not dropped; same-day cost never crosses.

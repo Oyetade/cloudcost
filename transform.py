@@ -20,6 +20,17 @@ import pandas as pd
 # Regime boundaries (section 5.7). Feature availability, not just gate
 # availability, differs across these. Model layer filters on data_regime;
 # the transform only labels.
+#
+# COST_HISTORY_START: raw_cost is continuous from Jan 2021, but the monthly
+# row count AND monthly total pre_tax_cost both ramp together through 2021,
+# flattening around Aug 2022. That lockstep ramp is genuine onboarding
+# (workloads progressively brought under management), not a logging-
+# granularity change, so pre-Aug-2022 totals UNDERSTATE the true estate and
+# must not train a level-based target. Rows before this floor are labelled
+# 'pre_coverage' and excluded from training frames (they stay in the raw
+# extract). Single tunable: move it if a later cost-vs-rowcount review shifts
+# the observed plateau.
+COST_HISTORY_START = date(2022, 8, 1)  # onboarding ramp complete; estate stable
 ACTIVITY_START = date(2023, 8, 1)   # job_usage / job_cost begin
 RUN_STATUS_START = date(2024, 1, 2)  # run_status begins; gate evaluable
 
@@ -36,8 +47,12 @@ def stamp_regime(frame: pd.DataFrame) -> pd.DataFrame:
     """Stamp each row with its data_regime (section 5.7), so the model layer
     can select its own window rather than the transform hardcoding a date.
 
-      cost_only        : before ACTIVITY_START. Cost target only; activity
-                         features are null BY CONSTRUCTION, never imputed.
+      pre_coverage     : before COST_HISTORY_START. Onboarding ramp; totals
+                         understate the true estate. Excluded from training
+                         frames (see drop_pre_coverage), kept in raw extract.
+      cost_only        : COST_HISTORY_START .. ACTIVITY_START. Representative
+                         cost target, but activity features are null BY
+                         CONSTRUCTION, never imputed.
       featured_ungated : ACTIVITY_START .. RUN_STATUS_START. Featured, but
                          no gate could be evaluated.
       featured_gated   : on/after RUN_STATUS_START. Featured and gated.
@@ -46,11 +61,22 @@ def stamp_regime(frame: pd.DataFrame) -> pd.DataFrame:
     regime = pd.Series("featured_gated", index=frame.index, dtype=object)
     regime[rd < RUN_STATUS_START] = "featured_ungated"
     regime[rd < ACTIVITY_START] = "cost_only"
+    regime[rd < COST_HISTORY_START] = "pre_coverage"
     frame = frame.copy()
     frame["data_regime"] = pd.Categorical(
-        regime, categories=["cost_only", "featured_ungated", "featured_gated"]
+        regime,
+        categories=["pre_coverage", "cost_only",
+                    "featured_ungated", "featured_gated"],
     )
     return frame
+
+
+def drop_pre_coverage(frame: pd.DataFrame) -> pd.DataFrame:
+    """Remove onboarding-ramp rows from a training frame. The transform keeps
+    pre_coverage rows labelled rather than silently dropping them, so this
+    exclusion is an explicit, testable step the caller can see and audit.
+    """
+    return frame[frame["data_regime"] != "pre_coverage"].copy()
 
 
 def load_snapshot(snapshot_dir: str | Path) -> dict[str, pd.DataFrame]:
@@ -239,6 +265,7 @@ def build_pool_frame(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     # regime label explains the null and the model layer decides what to do.
     frame = target.merge(activity, on=POOL_KEYS, how="left")
     frame = stamp_regime(frame)
+    frame = drop_pre_coverage(frame)
     frame = apply_gate(frame, gate, "pool_frame",
                        run_status_start=RUN_STATUS_START)
     frame.attrs["orphan_report"] = orphans
@@ -267,8 +294,10 @@ def build_team_frame(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
         .reset_index()
     )
     # job_cost starts at ACTIVITY_START, so the team frame has no cost_only
-    # regime; it is featured_ungated then featured_gated only.
+    # or pre_coverage regime in practice; drop_pre_coverage is a no-op here
+    # but kept for symmetry and safety against backfilled early rows.
     target = stamp_regime(target)
+    target = drop_pre_coverage(target)
     frame = apply_gate(target, gate, "team_frame",
                        run_status_start=RUN_STATUS_START)
     return frame

@@ -16,6 +16,40 @@ def _rs(run_date, sub, rtype, status, update):
     }
 
 
+class TestStampRegime:
+    def _frame(self, dates):
+        return pd.DataFrame({"run_date": dates, "cost": [1.0] * len(dates)})
+
+    def test_all_four_regimes_assigned_by_boundary(self):
+        f = self._frame([
+            date(2022, 1, 1),   # pre_coverage  (< 2022-08-01)
+            date(2022, 8, 1),   # cost_only     (>= floor, < activity)
+            date(2023, 8, 1),   # featured_ungated (>= activity, < run_status)
+            date(2024, 1, 2),   # featured_gated (>= run_status)
+        ])
+        out = T.stamp_regime(f)
+        assert list(out["data_regime"]) == [
+            "pre_coverage", "cost_only", "featured_ungated", "featured_gated"
+        ]
+
+    def test_boundaries_are_half_open_on_the_left(self):
+        # the day BEFORE a boundary belongs to the earlier regime
+        f = self._frame([date(2022, 7, 31), date(2023, 7, 31),
+                         date(2024, 1, 1)])
+        out = T.stamp_regime(f)
+        assert list(out["data_regime"]) == [
+            "pre_coverage", "cost_only", "featured_ungated"
+        ]
+
+    def test_drop_pre_coverage_removes_only_ramp(self):
+        f = T.stamp_regime(self._frame([
+            date(2022, 1, 1), date(2022, 8, 1), date(2024, 6, 1)
+        ]))
+        kept = T.drop_pre_coverage(f)
+        assert len(kept) == 2
+        assert "pre_coverage" not in set(kept["data_regime"])
+
+
 class TestGate:
     def test_all_three_complete_passes_gate(self):
         rs = pd.DataFrame([
