@@ -29,16 +29,25 @@ SCHEMA = "cat"
 # --- dtype policy, applied at landing -------------------------------------
 # Low-cardinality strings -> category (this is where the memory savings live).
 # Date/timestamp strings -> parsed. Everything else left as-is.
+# Categoricals save memory on low-cardinality DESCRIPTIVE columns, but they
+# are dangerous on columns used as groupby/merge KEYS: pandas groupby with
+# the default observed=False generates the full cartesian product of all
+# category levels, most of them empty, exploding row counts. So KEY columns
+# (subscription_id, batch_account_name, pool_name, job_* keys, run_type)
+# are deliberately kept as plain strings here; only descriptive columns are
+# categoricals. Downstream groupbys also pass observed=True as belt-and-braces.
 CATEGORY_COLS = {
-    "subscription_id", "subscription_name", "resource_group_name",
-    "resource_type", "service_name", "service_tier", "meter",
-    "meter_category", "meter_sub_category", "batch_account_name",
-    "pool_name", "currency", "os_type", "location", "sku",
+    "subscription_name", "resource_type",
+    "service_name", "service_tier", "meter",
+    "meter_category", "meter_sub_category", "currency",
+    "os_type", "location", "sku",
     "product_name", "product_type", "environment_tier",
-    "environment_sub_tier", "run_type", "status", "category",
-    "ownership", "team", "placement_score", "eviction_rate",
-    "job_category", "job_ownership", "job_team",
+    "environment_sub_tier", "status", "category",
+    "ownership", "placement_score", "eviction_rate",
 }
+# Explicitly NOT categorical (join/group keys): subscription_id,
+# resource_group_name, batch_account_name, pool_name, run_type, team,
+# job_category, job_ownership, job_team.
 DATE_COLS = {"run_date", "date", "start_date", "end_date"}
 TS_COLS = {"start_time", "end_time", "update_time", "date_time", "run_time"}
 

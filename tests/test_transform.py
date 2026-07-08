@@ -238,3 +238,36 @@ class TestTeamFrame:
         assert "Unknown" in teams
         assert "__NULL_TEAM__" in teams
         assert len(frame) == 2  # kept distinct, not merged
+
+
+class TestCategoricalFanoutRegression:
+    """Regression: categorical group keys with unused levels must not create
+    phantom groups. This is the bug that turned 4.66M raw_cost rows into
+    122M pool-days (groupby observed=False cartesian product)."""
+
+    def test_daily_cost_by_pool_no_phantom_groups(self):
+        from datetime import timedelta
+        raw = []
+        d0 = date(2024, 1, 2)
+        combos = [("s1", "a1", "p1"), ("s2", "a2", "p2")]  # only 2 real
+        for i in range(4):
+            d = d0 + timedelta(days=i)
+            for (s, a, p) in combos:
+                for meter in ["D64", "E32"]:
+                    raw.append(dict(
+                        run_date=d, subscription_id=s, resource_group_name="rg",
+                        resource_type="vmss", meter=meter,
+                        batch_account_name=a, pool_name=p,
+                        pre_tax_cost=100.0, usage_quantity=10.0))
+        raw = pd.DataFrame(raw)
+        # categorical keys with EXTRA unused levels = the fanout trigger
+        raw["subscription_id"] = pd.Categorical(
+            raw["subscription_id"], categories=["s1", "s2", "s3", "s4"])
+        raw["batch_account_name"] = pd.Categorical(
+            raw["batch_account_name"], categories=["a1", "a2", "a3"])
+        raw["pool_name"] = pd.Categorical(
+            raw["pool_name"], categories=["p1", "p2", "p3", "p4"])
+
+        target = T.daily_cost_by_pool(raw)
+        # 4 days x 2 real combos = 8, NOT 4 x 4 x 3 x 4 phantom groups
+        assert len(target) == 8

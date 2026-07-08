@@ -111,6 +111,7 @@ def build_gate(run_status: pd.DataFrame) -> pd.DataFrame:
     )
     rs["is_complete"] = rs["status"].astype(str).eq("Complete")
     piv = rs.pivot_table(
+        observed=True,
         index=["run_date", "subscription_id"],
         columns="run_type",
         values="is_complete",
@@ -221,7 +222,7 @@ def daily_cost_by_pool(raw_cost: pd.DataFrame) -> pd.DataFrame:
     """
     batch = raw_cost[raw_cost["pool_name"].notna()].copy()
     agg = (
-        batch.groupby(POOL_KEYS)["pre_tax_cost"]
+        batch.groupby(POOL_KEYS, observed=True)["pre_tax_cost"]
         .sum()
         .rename("cost")
         .reset_index()
@@ -255,7 +256,7 @@ def build_pool_frame(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
     joined, orphans = join_job_attributes(job_usage, job_cost)
     activity = (
-        joined.groupby(POOL_KEYS)
+        joined.groupby(POOL_KEYS, observed=True)
         .agg(job_seconds=("job_seconds", "sum"),
              task_count=("task_count", "sum"))
         .reset_index()
@@ -294,7 +295,7 @@ def build_team_frame(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     jc["job_team"] = jc["job_team"].fillna("__NULL_TEAM__")
 
     target = (
-        jc.groupby(["run_date", "subscription_id", "job_team"])["cost"]
+        jc.groupby(["run_date", "subscription_id", "job_team"], observed=True)["cost"]
         .sum()
         .rename("cost")
         .reset_index()

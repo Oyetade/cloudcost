@@ -43,7 +43,7 @@ def _batch_raw_cost_by_pool_day(raw_cost: pd.DataFrame) -> pd.DataFrame:
     """
     batch = raw_cost[raw_cost["pool_name"].notna()]
     return (
-        batch.groupby(POOL_DAY_KEYS)["pre_tax_cost"]
+        batch.groupby(POOL_DAY_KEYS, observed=True)["pre_tax_cost"]
         .sum()
         .rename("raw_cost")
         .reset_index()
@@ -53,7 +53,7 @@ def _batch_raw_cost_by_pool_day(raw_cost: pd.DataFrame) -> pd.DataFrame:
 def _job_cost_by_pool_day(job_cost: pd.DataFrame) -> pd.DataFrame:
     """Attributed cost aggregated to pool-day."""
     return (
-        job_cost.groupby(POOL_DAY_KEYS)["cost"]
+        job_cost.groupby(POOL_DAY_KEYS, observed=True)["cost"]
         .sum()
         .rename("job_cost")
         .reset_index()

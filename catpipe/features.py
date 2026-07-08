@@ -51,10 +51,10 @@ def concurrency_by_pool_day(
     events["day"] = pd.to_datetime(events["t"]).dt.date
     # ends (delta -1) sort before starts (delta +1) at equal timestamp
     events = events.sort_values(pool_keys + ["t", "delta"]).reset_index(drop=True)
-    events["running"] = events.groupby(pool_keys)["delta"].cumsum()
+    events["running"] = events.groupby(pool_keys, observed=True)["delta"].cumsum()
 
     out = (
-        events.groupby(pool_keys + ["day"])["running"]
+        events.groupby(pool_keys + ["day"], observed=True)["running"]
         .agg(peak_concurrency="max", mean_concurrency="mean")
         .reset_index()
     )
@@ -79,9 +79,9 @@ def job_mix_by_pool_day(
     df = jobs.copy()
     grp = pool_keys + [day_col]
 
-    totals = df.groupby(grp)[seconds_col].sum().rename("total_seconds")
-    n_jobs = df.groupby(grp).size().rename("n_jobs")
-    largest = df.groupby(grp)[seconds_col].max().rename("largest_seconds")
+    totals = df.groupby(grp, observed=True)[seconds_col].sum().rename("total_seconds")
+    n_jobs = df.groupby(grp, observed=True).size().rename("n_jobs")
+    largest = df.groupby(grp, observed=True)[seconds_col].max().rename("largest_seconds")
 
     base = pd.concat([totals, n_jobs, largest], axis=1).reset_index()
     base["largest_job_share"] = np.where(
@@ -91,7 +91,7 @@ def job_mix_by_pool_day(
     )
 
     cat = (
-        df.groupby(grp + [category_col])[seconds_col]
+        df.groupby(grp + [category_col], observed=True)[seconds_col]
         .sum()
         .reset_index()
     )
@@ -100,6 +100,7 @@ def job_mix_by_pool_day(
         cat["total_seconds"] > 0, cat[seconds_col] / cat["total_seconds"], 0.0
     )
     wide = cat.pivot_table(
+        observed=True,
         index=grp, columns=category_col, values="share", fill_value=0.0
     )
     wide.columns = [f"share_{c}" for c in wide.columns]

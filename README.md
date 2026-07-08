@@ -38,6 +38,25 @@ closes, only the extract predicate changes; nothing downstream moves.
 | `assertions.py` | Reusable invariants; raise `DataQualityError` | 7.1, 7.5, 7.3 |
 | `features.py` | Concurrency sweep, job-mix | 7.4 |
 | `transform.py` | Gate, join, mask, frame assembly | 7.3, 7.5, 5.4 |
+| `reconcile.py` | Pool-day job_cost vs raw_cost: the target-choice diagnostic | 3.3, target choice |
+
+## Which cost is the physical target? (reconcile.py)
+
+`raw_cost` is billed truth without lineage (no job_id, reaches to 2021);
+`job_cost` is lineage without proven billed truth (native join to activity,
+but attributed/derived and only from Aug 2023). At daily-pool grain the
+missing job_id costs the pool model little, since job_id is aggregated away
+either way. What decides the target is whether `job_cost` faithfully
+re-expresses billed cost or is a reweighted/partial slice of it.
+
+`reconcile.reconcile_pool_day` + `reconciliation_summary` answer this
+empirically: aggregate both to pool-day, outer-join, and report the ratio,
+the unattributed share, per-day dispersion, and a plain verdict. Three
+outcomes: **faithful** (use job_cost as the 1a target from Aug 2023 for the
+cleaner join, raw_cost supplies the pre-2023 tail); **partial** (raw_cost
+wins for 1a, job_cost stays the team target only); **close-but-loose** (prefer
+raw_cost, inspect the largest-divergence pool-days first). This is a query you
+can run today, without waiting on the open question of how job_cost is derived.
 
 ## Data regimes and the three-state gate (section 5.7)
 
@@ -72,7 +91,7 @@ product, so it cannot dishonestly start in 2023 for a gated model.
 
 ## What the tests cover
 
-`pytest tests/` — 51 tests. The ones that matter:
+`pytest tests/` — 57 tests. The ones that matter:
 
 - **Concurrency sweep** — overlap, sequential, instantaneous handover (no
   false peak), independent pools, null-time drop, triple overlap.
@@ -110,3 +129,49 @@ product, so it cannot dishonestly start in 2023 for a gated model.
 Lagging and calendar-lead feature construction (kept out of the skeleton so
 the join/gate logic stays legible), the non-pool residual (product 1b), and
 the anomaly detector — all of which reuse these frames.
+
+## Gotchas learned from real data
+
+**Categorical keys + groupby = cartesian fanout.** pandas `groupby` on
+categorical columns defaults to `observed=False`, which emits one group per
+combination of *all category levels* whether or not they occur — exploding
+4.66M raw_cost rows into 122M phantom pool-days. Fixed two ways: join/group
+KEY columns are kept as plain strings in the extract (only descriptive
+low-cardinality columns are categoricals), and every groupby/pivot passes
+`observed=True` as belt-and-braces. Regression-tested.
+
+**~76% of raw_cost has null pool.** batch_account_name and pool_name are null
+on ~3.55M of 4.66M rows: these are non-batch estate spend, not pool
+workloads. `daily_cost_by_pool` correctly filters to `pool_name.notna()`, so
+the pool frame covers only the batch minority (~24% of rows). The other ~76%
+is the non-pool residual (product 1b), still to be built. The reconciliation
+ratio of ~0.34 was job_cost (batch-only) compared against all-estate
+raw_cost — a scope mismatch, not attribution loss. The fair comparison is
+job_cost against the batch (pool-not-null) slice only.
+
+## Running it
+
+Install the approved stack, then either extract-and-build or build from an
+existing snapshot:
+
+```bash
+pip install pandas numpy pyarrow sqlalchemy psycopg pytest
+
+# tests only (no database):
+PYTHONPATH=. python -m pytest tests/ -q
+
+# full pipeline from Postgres (read-only SELECT):
+export CAT_DSN="postgresql+psycopg://USER:PASSWORD@HOST:5432/DBNAME"
+PYTHONPATH=. python -m catpipe.run_pipeline --extract --out ./snapshots
+
+# build frames from an existing snapshot (skips the database):
+PYTHONPATH=. python -m catpipe.run_pipeline --snapshot ./snapshots/<timestamp>
+
+# just the target-choice reconciliation:
+PYTHONPATH=. python -m catpipe.run_pipeline --snapshot ./snapshots/<ts> --reconcile-only
+```
+
+Outputs land in `<snapshot>/frames/`: `frame_pool.parquet`,
+`frame_team.parquet`, `reconciliation_pool_day.parquet`, and
+`recon_summary.json` (which carries the target-choice verdict). The pipeline
+prints a short report including the reconciliation verdict on completion.

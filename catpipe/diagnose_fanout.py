@@ -85,7 +85,7 @@ def diagnose(snapshot_dir: str | Path) -> None:
     # Stage 3: the activity aggregate
     joined, _ = T.join_job_attributes(job_usage, job_cost)
     activity = (
-        joined.groupby(T.POOL_KEYS)
+        joined.groupby(T.POOL_KEYS, observed=True)
         .agg(job_seconds=("job_seconds", "sum"),
              task_count=("task_count", "sum"))
         .reset_index()
