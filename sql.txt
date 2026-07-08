@@ -13,3 +13,42 @@ FULL OUTER JOIN
   ON  r.subscription_id     = j.subscription_id
   AND r.batch_account_name  = j.batch_account_name
   AND r.pool_name           = j.pool_name;
+
+
+
+WITH r AS (
+    SELECT run_date, subscription_id, batch_account_name, pool_name,
+           sum(pre_tax_cost) AS raw_cost
+    FROM cat.raw_cost
+    WHERE pool_name IS NOT NULL
+    GROUP BY run_date, subscription_id, batch_account_name, pool_name
+),
+j AS (
+    SELECT run_date, subscription_id, batch_account_name, pool_name,
+           sum(cost) AS job_cost
+    FROM cat.job_cost
+    WHERE pool_name IS NOT NULL
+    GROUP BY run_date, subscription_id, batch_account_name, pool_name
+),
+both AS (
+    SELECT r.raw_cost, j.job_cost,
+           (j.job_cost - r.raw_cost) / NULLIF(r.raw_cost, 0) AS rel_diff
+    FROM r
+    JOIN j                              -- inner join: shared pool-days only
+      ON  r.run_date            = j.run_date
+      AND r.subscription_id     = j.subscription_id
+      AND r.batch_account_name  = j.batch_account_name
+      AND r.pool_name           = j.pool_name
+)
+SELECT
+    count(*)                                              AS shared_pool_days,
+    round(avg(rel_diff)::numeric, 4)                      AS mean_rel_diff,
+    round((percentile_cont(0.50) WITHIN GROUP (ORDER BY rel_diff))::numeric, 4) AS median_rel_diff,
+    round(min(rel_diff)::numeric, 4)                      AS min_rel_diff,
+    round(max(rel_diff)::numeric, 4)                      AS max_rel_diff,
+    count(*) FILTER (WHERE job_cost > raw_cost)           AS days_job_exceeds_raw,
+    count(*) FILTER (WHERE job_cost = 0)                  AS days_job_zero,
+    round(sum(job_cost)::numeric, 2)                      AS total_job_cost,
+    round(sum(raw_cost)::numeric, 2)                      AS total_raw_cost,
+    round((sum(job_cost) / NULLIF(sum(raw_cost), 0))::numeric, 4) AS agg_ratio
+FROM both;
