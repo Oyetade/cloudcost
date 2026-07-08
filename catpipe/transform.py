@@ -241,9 +241,15 @@ def build_pool_frame(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     job_cost = tables["job_cost"]
     gate = build_gate(tables["run_status"])
 
+    # raw_cost has no PK (7.1), so this is a near-duplicate heuristic, not a
+    # key assertion. Include pool identity: two different pools billing the
+    # same meter on the same day are distinct rows, not duplicates. The true
+    # grain of raw_cost is an open question; widen this key if real data
+    # still shows legitimate rows colliding.
     A.assert_no_duplicates(raw_cost, ["run_date", "subscription_id",
                                       "resource_group_name", "resource_type",
-                                      "meter"], "raw_cost")
+                                      "meter", "batch_account_name",
+                                      "pool_name"], "raw_cost")
 
     target = daily_cost_by_pool(raw_cost)
 
