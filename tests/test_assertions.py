@@ -44,20 +44,20 @@ class TestAntiJoin:
         assert rep["L_only"] == 0 and rep["R_only"] == 0
 
 
-class TestGateComplete:
-    def test_passes_all_true(self):
-        df = pd.DataFrame({"gate_complete": [True, True]})
-        A.assert_gate_complete(df, "ctx")
+class TestNoFailedGate:
+    def test_passes_when_only_complete_and_ungated(self):
+        df = pd.DataFrame({"gate_state": ["gated_complete", "ungated"]})
+        A.assert_no_failed_gate(df, "ctx")
 
-    def test_raises_on_false_slipping_through(self):
-        df = pd.DataFrame({"gate_complete": [True, False]})
-        with pytest.raises(A.DataQualityError, match="passed the gate"):
-            A.assert_gate_complete(df, "ctx")
+    def test_raises_when_failed_survives(self):
+        df = pd.DataFrame({"gate_state": ["gated_complete", "gated_failed"]})
+        with pytest.raises(A.DataQualityError, match="gated_failed"):
+            A.assert_no_failed_gate(df, "ctx")
 
     def test_raises_on_missing_column(self):
         df = pd.DataFrame({"other": [1]})
         with pytest.raises(A.DataQualityError, match="missing"):
-            A.assert_gate_complete(df, "ctx")
+            A.assert_no_failed_gate(df, "ctx")
 
 
 class TestNoSameDayCost:
