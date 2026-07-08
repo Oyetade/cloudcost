@@ -1,0 +1,15 @@
+SELECT
+    count(*) FILTER (WHERE r.pool_name IS NOT NULL AND j.pool_name IS NOT NULL) AS in_both,
+    count(*) FILTER (WHERE r.pool_name IS NOT NULL AND j.pool_name IS NULL)     AS raw_only,
+    count(*) FILTER (WHERE r.pool_name IS NULL AND j.pool_name IS NOT NULL)     AS job_only
+FROM
+    (SELECT DISTINCT subscription_id, batch_account_name, pool_name
+     FROM cat.raw_cost
+     WHERE run_date = '2026-01-05' AND pool_name IS NOT NULL) r
+FULL OUTER JOIN
+    (SELECT DISTINCT subscription_id, batch_account_name, pool_name
+     FROM cat.job_cost
+     WHERE run_date = '2026-01-05' AND pool_name IS NOT NULL) j
+  ON  r.subscription_id     = j.subscription_id
+  AND r.batch_account_name  = j.batch_account_name
+  AND r.pool_name           = j.pool_name;
