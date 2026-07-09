@@ -146,22 +146,53 @@ LEFT JOIN non_pool n ON n.run_date = d.run_date
 GROUP BY 1
 ORDER BY 1;
 
+-- Daily non-pool (1b residual) total, from job_cost coverage onward
+SELECT
+    run_date,
+    COUNT(*)                               AS rows,
+    ROUND(SUM(pre_tax_cost)::numeric, 2)   AS residual_cost
+FROM cat.raw_cost
+WHERE pool_name IS NULL
+  AND run_date >= DATE '2023-08-01'
+GROUP BY run_date
+ORDER BY run_date;
 
+-- Daily non-pool (1b residual) total, from job_cost coverage onward split by subscription
+SELECT
+    run_date,
+    subscription_id,
+    ROUND(SUM(pre_tax_cost)::numeric, 2)   AS residual_cost
+FROM cat.raw_cost
+WHERE pool_name IS NULL
+  AND run_date >= DATE '2023-08-01'
+GROUP BY run_date, subscription_id
+ORDER BY run_date, subscription_id;
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-FROM idle
+-- actual money
+SELECT
+    meter_category,                          -- or service_name; check the schema
+    COUNT(*)                                 AS rows,
+    ROUND(SUM(pre_tax_cost)::numeric, 2)     AS total_cost,
+    ROUND(100.0 * SUM(pre_tax_cost)
+          / SUM(SUM(pre_tax_cost)) OVER (), 1) AS pct_of_residual
+FROM cat.raw_cost
+WHERE pool_name IS NULL
+  AND run_date >= DATE '2023-08-01'
 GROUP BY 1
-ORDER BY 1;
+ORDER BY total_cost DESC
+LIMIT 20;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
