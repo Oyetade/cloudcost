@@ -136,51 +136,6 @@ non_pool AS (
     WHERE pool_name IS NULL
     GROUP BY run_date
 )
-
-
-WITH raw_pd AS (
-    SELECT run_date, pool_name, SUM(pre_tax_cost) AS raw_pool_cost
-    FROM cat.raw_cost
-    WHERE pool_name IS NOT NULL
-    GROUP BY run_date, pool_name
-),
-job_pd AS (
-    SELECT run_date, pool_name, SUM(cost) AS attributed_cost
-    FROM cat.job_cost
-    GROUP BY run_date, pool_name
-),
-non_pool_d AS (
-    SELECT run_date, SUM(pre_tax_cost) AS residual_cost
-    FROM cat.raw_cost
-    WHERE pool_name IS NULL
-    GROUP BY run_date
-),
-pool_joined AS (
-    SELECT r.run_date,
-           r.raw_pool_cost,
-           COALESCE(j.attributed_cost, 0) AS attributed_cost
-    FROM raw_pd r
-    LEFT JOIN job_pd j
-      ON j.run_date = r.run_date AND j.pool_name = r.pool_name
-),
-pool_daily AS (
-    SELECT run_date,
-           SUM(raw_pool_cost)                      AS raw_pool_cost,
-           SUM(attributed_cost)                    AS attributed_cost,
-           SUM(raw_pool_cost - attributed_cost)    AS idle_cost
-    FROM pool_joined
-    GROUP BY run_date
-)
-SELECT
-    DATE_TRUNC('month', p.run_date)                        AS month,
-    ROUND(SUM(p.attributed_cost)::numeric, 2)              AS attributed_pool_cost,
-    ROUND(SUM(p.idle_cost)::numeric, 2)                    AS idle_cost,
-    ROUND(SUM(COALESCE(n.residual_cost, 0))::numeric, 2)   AS residual_cost_1b
-FROM pool_daily p
-LEFT JOIN non_pool_d n ON n.run_date = p.run_date
-GROUP BY 1
-ORDER BY 1;
-
 SELECT
     DATE_TRUNC('month', d.run_date)                                   AS month,
     ROUND(SUM(d.attributed_cost)::numeric, 2)                         AS attributed_pool_cost,
@@ -312,10 +267,41 @@ WHERE pool_name IS NULL
   AND run_date BETWEEN DATE '2024-11-25' AND DATE '2025-01-15'
 GROUP BY run_date ORDER BY run_date;
 
+--Days with non-pool spend but no pool rows. The final LEFT JOIN is anchored on pool_daily, so any run_date that has null-pool raw_cost and no not-null-pool raw_cost at all is silently dropped. Its residual never enters the sum. The partition check showed non-pool starting 2021-01-14 and pool starting 2021-01-19 — five days at the very beginning where non-pool exists and pool may not. Five sparse early days at £12 apiece would be about right.
+Or attributed_cost exceeding raw_pool_cost on some pool-day, making a small negative idle that offsets. Less likely given the exact-match finding, but it costs nothing to look.
+
+
+SELECT n.run_date,
+       ROUND(n.residual_cost::numeric, 2) AS orphan_residual
+FROM (
+    SELECT run_date, SUM(pre_tax_cost) AS residual_cost
+    FROM cat.raw_cost WHERE pool_name IS NULL
+    GROUP BY run_date
+) n
+LEFT JOIN (
+    SELECT DISTINCT run_date
+    FROM cat.raw_cost WHERE pool_name IS NOT NULL
+) p ON p.run_date = n.run_date
+WHERE p.run_date IS NULL
+ORDER BY n.run_date;
 
 
 
-
+If those rows sum to 62.54, that is the whole of it, and the fix is to build a date spine and FULL OUTER JOIN both sides onto it rather than anchoring on pool-days. Which is the same class of error as the fanout: I let the shape of one table dictate the shape of the result.
+And the second, worth one query regardless:
+SELECT COUNT(*) AS negative_idle_pool_days,
+       ROUND(SUM(raw_pool_cost - attributed_cost)::numeric, 2) AS total_negative
+FROM (
+    SELECT r.run_date, r.pool_name, r.raw_pool_cost,
+           COALESCE(j.attributed_cost, 0) AS attributed_cost
+    FROM (SELECT run_date, pool_name, SUM(pre_tax_cost) AS raw_pool_cost
+          FROM cat.raw_cost WHERE pool_name IS NOT NULL
+          GROUP BY 1,2) r
+    LEFT JOIN (SELECT run_date, pool_name, SUM(cost) AS attributed_cost
+               FROM cat.job_cost GROUP BY 1,2) j
+      ON j.run_date = r.run_date AND j.pool_name = r.pool_name
+) x
+WHERE raw_pool_cost - attributed_cost < -0.005;
 
 
 
