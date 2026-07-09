@@ -271,3 +271,58 @@ class TestCategoricalFanoutRegression:
         target = T.daily_cost_by_pool(raw)
         # 4 days x 2 real combos = 8, NOT 4 x 4 x 3 x 4 phantom groups
         assert len(target) == 8
+
+
+class TestBatchSliceDuplicateCheck:
+    """The raw_cost duplicate check runs on the batch slice only: null-pool
+    non-batch rows legitimately repeat on the pool-key and must not trip it,
+    but genuine duplicates WITHIN the batch slice must still be caught."""
+
+    def _raw(self, rows):
+        return pd.DataFrame([
+            dict(run_date=r[0], subscription_id="s", resource_group_name="rg",
+                 resource_type=r[1], meter=r[2], batch_account_name=r[3],
+                 pool_name=r[4], pre_tax_cost=r[5], usage_quantity=1.0)
+            for r in rows
+        ])
+
+    def test_null_pool_repeats_do_not_trip_check(self):
+        # two identical null-pool storage rows: benign, must NOT raise
+        raw = self._raw([
+            (date(2024, 3, 1), "storage", "Read Ops", None, None, 5.0),
+            (date(2024, 3, 1), "storage", "Read Ops", None, None, 7.0),
+            (date(2024, 3, 1), "vmss", "D64", "acct", "eod", 100.0),
+        ])
+        ju = pd.DataFrame(columns=["run_date", "subscription_id",
+                                   "batch_account_name", "pool_name", "job_id",
+                                   "start_time", "end_time",
+                                   "job_seconds", "task_count"])
+        jc = pd.DataFrame(columns=["run_date", "subscription_id",
+                                   "batch_account_name", "pool_name", "job_id",
+                                   "job_name", "job_category", "job_ownership",
+                                   "job_team", "cost"])
+        rs = pd.DataFrame([
+            dict(run_date=date(2024, 3, 1), subscription_id="s", run_type=rt,
+                 status="Complete",
+                 update_time=pd.Timestamp("2024-03-02", tz="UTC"))
+            for rt in ["Cost", "Usage", "Attribution"]
+        ])
+        # must not raise despite the duplicate null-pool rows
+        frame = T.build_pool_frame(
+            {"raw_cost": raw, "job_usage": ju, "job_cost": jc,
+             "run_status": rs})
+        assert len(frame) == 1  # only the one batch pool-day
+
+    def test_genuine_batch_duplicate_still_caught(self):
+        # two identical BATCH rows (same pool, same meter, same day): real
+        # duplicate, must still raise
+        raw = self._raw([
+            (date(2024, 3, 1), "vmss", "D64", "acct", "eod", 100.0),
+            (date(2024, 3, 1), "vmss", "D64", "acct", "eod", 100.0),
+        ])
+        with pytest.raises(A.DataQualityError, match="duplicate"):
+            A.assert_no_duplicates(
+                raw[raw["pool_name"].notna()],
+                ["run_date", "subscription_id", "resource_group_name",
+                 "resource_type", "meter", "batch_account_name", "pool_name"],
+                "raw_cost[batch]")

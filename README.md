@@ -149,6 +149,15 @@ ratio of ~0.34 was job_cost (batch-only) compared against all-estate
 raw_cost — a scope mismatch, not attribution loss. The fair comparison is
 job_cost against the batch (pool-not-null) slice only.
 
+**The raw_cost duplicate check runs on the batch slice only.** The pool-key
+is a batch-shaped identity; non-batch rows (storage, network) carry null
+pool and legitimately repeat on it — a storage account bills many "Read
+Operations" lines a day. A whole-table check flagged 310k such benign rows.
+Since only pool-not-null rows feed the pool target, the check now runs on
+exactly that slice; genuine duplicates within the batch slice still raise.
+Non-batch raw_cost has a finer, resource-based grain and its own duplicate
+check belongs with product 1b.
+
 ## Running it
 
 Install the approved stack, then either extract-and-build or build from an

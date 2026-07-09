@@ -52,3 +52,42 @@ SELECT
     round(sum(raw_cost)::numeric, 2)                      AS total_raw_cost,
     round((sum(job_cost) / NULLIF(sum(raw_cost), 0))::numeric, 4) AS agg_ratio
 FROM both;
+
+--idle capacity
+WITH r AS (
+    SELECT run_date, subscription_id, batch_account_name, pool_name,
+           sum(pre_tax_cost) AS raw_cost
+    FROM cat.raw_cost
+    WHERE pool_name IS NOT NULL
+    GROUP BY run_date, subscription_id, batch_account_name, pool_name
+),
+j AS (
+    SELECT run_date, subscription_id, batch_account_name, pool_name,
+           sum(cost) AS job_cost
+    FROM cat.job_cost
+    WHERE pool_name IS NOT NULL
+    GROUP BY run_date, subscription_id, batch_account_name, pool_name
+),
+idle AS (
+    SELECT r.run_date, r.subscription_id, r.batch_account_name, r.pool_name,
+           r.raw_cost,
+           coalesce(j.job_cost, 0) AS job_cost,
+           r.raw_cost - coalesce(j.job_cost, 0) AS idle_cost,
+           (j.pool_name IS NULL) AS no_job_at_all
+    FROM r
+    LEFT JOIN j                          -- keep every raw_cost pool-day
+      ON  r.run_date            = j.run_date
+      AND r.subscription_id     = j.subscription_id
+      AND r.batch_account_name  = j.batch_account_name
+      AND r.pool_name           = j.pool_name
+)
+SELECT
+    date_trunc('month', run_date)                      AS month,
+    count(*)                                           AS pool_days,
+    count(*) FILTER (WHERE no_job_at_all)              AS idle_pool_days,
+    round(sum(raw_cost)::numeric, 2)                   AS total_cost,
+    round(sum(idle_cost)::numeric, 2)                  AS idle_cost,
+    round((sum(idle_cost) / NULLIF(sum(raw_cost),0) * 100)::numeric, 1) AS idle_pct
+FROM idle
+GROUP BY 1
+ORDER BY 1;

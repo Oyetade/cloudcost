@@ -34,8 +34,8 @@ COST_HISTORY_START = date(2022, 8, 1)  # onboarding ramp complete; estate stable
 ACTIVITY_START = date(2023, 8, 1)   # job_usage / job_cost begin
 RUN_STATUS_START = date(2024, 1, 2)  # run_status begins; gate evaluable
 
-from . import assertions as A
-from . import features as F
+import assertions as A
+import features as F
 
 GATE_TYPES = ("Cost", "Usage", "Attribution")
 JOB_KEYS = ["run_date", "subscription_id", "batch_account_name",
@@ -242,15 +242,21 @@ def build_pool_frame(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     job_cost = tables["job_cost"]
     gate = build_gate(tables["run_status"])
 
-    # raw_cost has no PK (7.1), so this is a near-duplicate heuristic, not a
-    # key assertion. Include pool identity: two different pools billing the
-    # same meter on the same day are distinct rows, not duplicates. The true
-    # grain of raw_cost is an open question; widen this key if real data
-    # still shows legitimate rows colliding.
-    A.assert_no_duplicates(raw_cost, ["run_date", "subscription_id",
-                                      "resource_group_name", "resource_type",
-                                      "meter", "batch_account_name",
-                                      "pool_name"], "raw_cost")
+    # Duplicate check applies to the BATCH slice only. The pool-key
+    # (…, batch_account_name, pool_name) is a batch-shaped identity; on
+    # non-batch rows (storage, network, etc.) pool_name and batch_account_name
+    # are null, so that key legitimately repeats — a storage account can bill
+    # many "Read Operations" lines a day. Running the check on the whole table
+    # flags those benign non-batch rows as duplicates (observed: 310k of them,
+    # all null-pool). Since daily_cost_by_pool uses only pool-not-null rows,
+    # check exactly that slice. Non-batch raw_cost has its own grain and its
+    # own duplicate check belongs with product 1b (the non-pool residual).
+    batch_slice = raw_cost[raw_cost["pool_name"].notna()]
+    A.assert_no_duplicates(batch_slice,
+                           ["run_date", "subscription_id",
+                            "resource_group_name", "resource_type",
+                            "meter", "batch_account_name",
+                            "pool_name"], "raw_cost[batch]")
 
     target = daily_cost_by_pool(raw_cost)
 

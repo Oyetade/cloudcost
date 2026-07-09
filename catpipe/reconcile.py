@@ -15,11 +15,20 @@ This is the diagnostic that decides the physical forecast target for product
 At daily-pool grain the job_id is aggregated away on both sides, so the
 missing job_id costs the pool model little. What matters instead is whether
 job_cost is a faithful re-expression of billed cost or a reweighted /
-partial slice of it. If they agree at pool-day, job_cost is safe to use as
-the 1a target from Aug 2023 (cleaner join to activity) and raw_cost need
-only supply the pre-2023 tail. If they diverge, the divergence IS the
-attribution distortion you would otherwise forecast, and raw_cost wins for
-1a decisively.
+partial slice of it.
+
+CONFIRMED (real data, 2026): on the pool-days both tables cover, job_cost
+equals raw_cost EXACTLY (aggregate ratio 1.0000, every rel_diff 0). But
+job_cost omits ~58% of raw_cost's pool-days -- pools that cost money on days
+with no attributed job. So job_cost is an EXACT SUBSET of raw_cost restricted
+to job-bearing pool-days, not a distortion of it. Consequences:
+  - physical pool forecast (1a) targets raw_cost: it is the superset, and
+    forecasting the bill needs the pool-days job_cost omits;
+  - team/attribution forecast (2) targets job_cost: its subsetting to
+    job-bearing pool-days is exactly right, and it carries team/category;
+  - raw_cost minus job_cost on the omitted pool-days is idle/unattributed
+    provisioned-capacity cost -- a first-class quantity that grows as more
+    Prod moves to cloud.
 
 This module answers that empirically. Pure pandas; reads a snapshot dict.
 """
@@ -140,23 +149,58 @@ def reconciliation_summary(recon: pd.DataFrame) -> dict:
 
 
 def _verdict(s: dict) -> str:
-    """A plain-language read of what the numbers imply for the target choice."""
+    """A plain-language read of what the numbers imply for the target choice.
+
+    Two INDEPENDENT dimensions, which the earlier version wrongly conflated:
+      (a) do costs AGREE on the pool-days both tables cover? (median rel_diff)
+      (b) does job_cost COVER all of raw_cost's pool-days? (unattributed share)
+
+    Confirmed against real data (2026): on shared pool-days job_cost equals
+    raw_cost EXACTLY (agg_ratio 1.0000, all rel_diff 0), but job_cost omits
+    ~58% of raw_cost's pool-days (pools that cost money on days with no
+    attributed job). So job_cost is not distorted -- it is an exact SUBSET of
+    raw_cost restricted to job-bearing pool-days. raw_cost is the physical
+    target because it is the superset; job_cost is the attribution target;
+    raw_cost minus job_cost on the raw_only pool-days is idle/unattributed
+    provisioned-capacity cost, a first-class quantity.
+    """
     ratio = s["aggregate_job_over_raw"]
     unattr = s["pct_raw_cost_unattributed"]
+    median_abs = s["median_abs_rel_diff_both"]
     share_ok = s["share_within_tol_of_both"]
 
-    if ratio is None or share_ok is None:
+    if ratio is None or share_ok is None or median_abs is None:
         return "insufficient overlap to judge; check coverage_counts"
 
-    if 0.97 <= ratio <= 1.03 and share_ok >= 0.9 and (unattr or 0) < 0.05:
-        return ("job_cost faithfully re-expresses billed cost at pool-day. "
-                "Safe to use job_cost as the 1a target from Aug 2023 for the "
-                "cleaner activity join; raw_cost supplies the pre-2023 tail.")
-    if ratio < 0.9 or (unattr or 0) >= 0.1:
-        return ("job_cost recovers only part of billed cost (unattributed "
-                "spend or a reweighted slice). It is a distorted target for a "
-                "physical forecast: raw_cost wins for 1a; job_cost stays the "
-                "team-model target only.")
-    return ("job_cost and raw_cost are close but not tight. Usable with "
-            "caution; prefer raw_cost for 1a unless the residual is explained. "
-            "Inspect the largest rel_diff pool-days before deciding.")
+    agree_on_overlap = median_abs <= 0.02 and share_ok >= 0.9
+    job_is_subset = (unattr or 0) >= 0.05  # raw_cost has pool-days job lacks
+
+    if agree_on_overlap and job_is_subset:
+        return (
+            "job_cost equals raw_cost on shared pool-days but omits "
+            f"{(unattr or 0)*100:.0f}% of raw_cost's pool-days: it is an EXACT "
+            "SUBSET of raw_cost restricted to job-bearing pool-days, not a "
+            "distorted target. raw_cost wins for the physical forecast (1a) "
+            "because it is the superset; job_cost is the attribution target "
+            "(2); raw_cost minus job_cost on the omitted pool-days is "
+            "idle/unattributed capacity cost, worth modelling in its own right."
+        )
+    if agree_on_overlap and not job_is_subset:
+        return (
+            "job_cost equals raw_cost on shared pool-days AND covers "
+            "essentially all of them: the two are interchangeable at pool "
+            "grain. Either serves as the physical target; prefer job_cost only "
+            "if its team/category columns are wanted on the same frame."
+        )
+    if not agree_on_overlap and job_is_subset:
+        return (
+            "job_cost both disagrees with raw_cost where they overlap AND "
+            "omits pool-days. raw_cost wins for the physical forecast; the "
+            "disagreement on shared days needs explaining before job_cost is "
+            "trusted even for attribution."
+        )
+    return (
+        "job_cost and raw_cost cover the same pool-days but disagree on cost "
+        "there. Prefer raw_cost for the physical forecast; inspect the largest "
+        "rel_diff pool-days to understand the disagreement."
+    )

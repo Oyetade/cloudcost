@@ -57,7 +57,8 @@ class TestAgreement:
         assert recon["within_tol"].all()
         summary = R.reconciliation_summary(recon)
         assert 0.97 <= summary["aggregate_job_over_raw"] <= 1.03
-        assert "faithfully re-expresses" in summary["verdict"]
+        # agree on overlap AND full coverage => interchangeable
+        assert "interchangeable" in summary["verdict"]
 
     def test_rel_diff_computed_correctly(self):
         raw = _raw([(date(2024, 3, 1), "s", "a", "p", 100.0)])
@@ -67,21 +68,25 @@ class TestAgreement:
         assert recon["abs_diff"].iloc[0] == pytest.approx(10.0)
 
 
-class TestDivergence:
-    def test_unattributed_spend_flags_raw_cost_wins(self):
-        # billed cost exists on many pool-days with NO job_cost row =>
-        # attribution recovers only part of spend.
+class TestSubset:
+    def test_exact_on_overlap_but_job_omits_pooldays(self):
+        # The confirmed real-data shape: job_cost equals raw_cost EXACTLY on
+        # shared pool-days, but raw_cost has extra pool-days job_cost lacks.
+        # => job_cost is an exact SUBSET, not a distortion. raw_cost wins 1a.
         raw = _raw([
             (date(2024, 3, 1), "s", "a", "p", 100.0),
             (date(2024, 3, 2), "s", "a", "p", 100.0),
             (date(2024, 3, 3), "s", "a", "p", 100.0),
         ])
-        job = _job([(date(2024, 3, 1), "s", "a", "p", 100.0)])  # only day 1
+        job = _job([(date(2024, 3, 1), "s", "a", "p", 100.0)])  # exact, day 1
         recon = R.reconcile_pool_day(raw, job)
         summary = R.reconciliation_summary(recon)
         assert summary["coverage_counts"].get("raw_only", 0) == 2
         assert summary["pct_raw_cost_unattributed"] == pytest.approx(2 / 3)
-        assert "raw_cost wins for 1a" in summary["verdict"]
+        # exact on the shared day (rel_diff 0) but a subset in coverage
+        assert summary["median_abs_rel_diff_both"] == pytest.approx(0.0)
+        assert "EXACT SUBSET" in summary["verdict"]
+        assert "raw_cost wins for the physical forecast" in summary["verdict"]
 
     def test_job_only_pool_day_is_flagged(self):
         # attribution with no matching ledger line: a data-quality signal.
@@ -109,6 +114,7 @@ class TestBorderline:
         ])
         recon = R.reconcile_pool_day(raw, job, rel_tol=0.05)
         summary = R.reconciliation_summary(recon)
-        # aggregate ratio ~1.005, but per-day dispersion breaches tol
+        # aggregate ratio ~1.005, but per-day dispersion breaches tol, and
+        # coverage is full => "disagree on cost" branch
         assert summary["share_within_tol_of_both"] < 0.9
-        assert "caution" in summary["verdict"]
+        assert "disagree on cost" in summary["verdict"]
