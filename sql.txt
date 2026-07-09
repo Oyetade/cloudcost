@@ -88,6 +88,80 @@ SELECT
     round(sum(raw_cost)::numeric, 2)                   AS total_cost,
     round(sum(idle_cost)::numeric, 2)                  AS idle_cost,
     round((sum(idle_cost) / NULLIF(sum(raw_cost),0) * 100)::numeric, 1) AS idle_pct
+
+
+--- check the residual grain
+
+SELECT run_date, subscription_id, COUNT(*) AS rows
+FROM cat.raw_cost
+WHERE pool_name IS NULL
+GROUP BY 1, 2
+HAVING COUNT(*) > 1
+ORDER BY rows DESC
+LIMIT 20;
+
+-- is partition clean
+SELECT
+    CASE WHEN pool_name IS NULL THEN 'non_pool (1b residual)'
+         ELSE 'pool (1a)' END          AS branch,
+    COUNT(*)                            AS rows,
+    ROUND(SUM(cost)::numeric, 2)        AS total_cost,
+    MIN(run_date)                       AS first_date,
+    MAX(run_date)                       AS last_date
+FROM cat.raw_cost
+GROUP BY 1
+ORDER BY 1;
+
+--. The three series, monthly
+WITH pool_days AS (
+    SELECT
+        r.run_date,
+        r.pool_name,
+        SUM(r.cost)                           AS raw_pool_cost,
+        COALESCE(SUM(j.job_cost_sum), 0)      AS attributed_cost
+    FROM cat.raw_cost r
+    LEFT JOIN (
+        SELECT run_date, pool_name, SUM(cost) AS job_cost_sum
+        FROM cat.job_cost
+        GROUP BY run_date, pool_name
+    ) j
+      ON j.run_date  = r.run_date
+     AND j.pool_name = r.pool_name
+    WHERE r.pool_name IS NOT NULL
+    GROUP BY r.run_date, r.pool_name
+),
+non_pool AS (
+    SELECT run_date, SUM(cost) AS residual_cost
+    FROM cat.raw_cost
+    WHERE pool_name IS NULL
+    GROUP BY run_date
+)
+SELECT
+    DATE_TRUNC('month', d.run_date)                                   AS month,
+    ROUND(SUM(d.attributed_cost)::numeric, 2)                         AS attributed_pool_cost,
+    ROUND(SUM(d.raw_pool_cost - d.attributed_cost)::numeric, 2)       AS idle_cost,
+    ROUND(MAX(n.residual_cost)::numeric, 2)                           AS residual_cost_1b
+FROM pool_days d
+LEFT JOIN non_pool n ON n.run_date = d.run_date
+GROUP BY 1
+ORDER BY 1;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 FROM idle
 GROUP BY 1
 ORDER BY 1;
