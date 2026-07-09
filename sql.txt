@@ -182,7 +182,62 @@ GROUP BY 1
 ORDER BY total_cost DESC
 LIMIT 20;
 
+--The diff query. Two windows, one join, ordered by the size of the change:
 
+WITH windows AS (
+    SELECT
+        service_name,
+        meter_category,
+        resource_type,
+        CASE WHEN run_date <  DATE '2024-12-15' THEN 'before' ELSE 'after' END AS win,
+        COUNT(*)            AS rows,
+        SUM(pre_tax_cost)   AS cost
+    FROM cat.raw_cost
+    WHERE pool_name IS NULL
+      AND run_date >= DATE '2024-09-15'    -- 3 months either side
+      AND run_date <  DATE '2025-03-15'
+    GROUP BY 1, 2, 3, 4
+),
+pivoted AS (
+    SELECT
+        service_name, meter_category, resource_type,
+        SUM(rows) FILTER (WHERE win = 'before') AS rows_before,
+        SUM(rows) FILTER (WHERE win = 'after')  AS rows_after,
+        SUM(cost) FILTER (WHERE win = 'before') AS cost_before,
+        SUM(cost) FILTER (WHERE win = 'after')  AS cost_after
+    FROM windows
+    GROUP BY 1, 2, 3
+)
+SELECT
+    service_name,
+    meter_category,
+    resource_type,
+    COALESCE(rows_before, 0)                          AS rows_before,
+    COALESCE(rows_after,  0)                          AS rows_after,
+    ROUND(COALESCE(cost_before, 0)::numeric, 2)       AS cost_before,
+    ROUND(COALESCE(cost_after,  0)::numeric, 2)       AS cost_after,
+    ROUND((COALESCE(cost_after, 0) - COALESCE(cost_before, 0))::numeric, 2) AS cost_delta,
+    CASE
+        WHEN rows_before IS NULL THEN 'APPEARED'
+        WHEN rows_after  IS NULL THEN 'DISAPPEARED'
+        ELSE 'both'
+    END                                               AS status
+FROM pivoted
+ORDER BY ABS(COALESCE(cost_after, 0) - COALESCE(cost_before, 0)) DESC
+LIMIT 40;
+
+
+--Then narrow to the exact date. Once you know which category moved, watch it daily across the break:
+SELECT
+    run_date,
+    COUNT(*)                               AS rows,
+    ROUND(SUM(pre_tax_cost)::numeric, 2)   AS cost
+FROM cat.raw_cost
+WHERE pool_name IS NULL
+  AND service_name = '<the one from above>'
+  AND run_date BETWEEN DATE '2024-11-25' AND DATE '2025-01-15'
+GROUP BY run_date
+ORDER BY run_date;
 
 
 
