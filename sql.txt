@@ -240,7 +240,32 @@ GROUP BY run_date
 ORDER BY run_date;
 
 
+--Two queries to close this out. Effective price, before and after, to confirm the price story:
+SELECT
+    CASE WHEN run_date < DATE '2024-12-15' THEN 'before' ELSE 'after' END AS win,
+    COUNT(*)                                              AS rows,
+    ROUND(SUM(pre_tax_cost)::numeric, 2)                  AS cost,
+    ROUND(SUM(usage_quantity)::numeric, 2)                AS usage,
+    ROUND((SUM(pre_tax_cost) / NULLIF(SUM(usage_quantity),0))::numeric, 6) AS eff_price
+FROM cat.raw_cost
+WHERE pool_name IS NULL
+  AND service_name  = 'Virtual Machines'
+  AND resource_type = 'microsoft.compute/virtualmachines'
+  AND run_date >= DATE '2024-09-15' AND run_date < DATE '2025-03-15'
+GROUP BY 1;
 
+--If eff_price falls by roughly two thirds while usage holds, the price story is confirmed and the meter tells you which SKU.
+--And the exact date, plus whether it lands on a billing boundary:
+
+SELECT run_date,
+       COUNT(*)                             AS rows,
+       ROUND(SUM(pre_tax_cost)::numeric, 2) AS cost
+FROM cat.raw_cost
+WHERE pool_name IS NULL
+  AND service_name  = 'Virtual Machines'
+  AND resource_type = 'microsoft.compute/virtualmachines'
+  AND run_date BETWEEN DATE '2024-11-25' AND DATE '2025-01-15'
+GROUP BY run_date ORDER BY run_date;
 
 
 
