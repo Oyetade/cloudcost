@@ -136,6 +136,51 @@ non_pool AS (
     WHERE pool_name IS NULL
     GROUP BY run_date
 )
+
+
+WITH raw_pd AS (
+    SELECT run_date, pool_name, SUM(pre_tax_cost) AS raw_pool_cost
+    FROM cat.raw_cost
+    WHERE pool_name IS NOT NULL
+    GROUP BY run_date, pool_name
+),
+job_pd AS (
+    SELECT run_date, pool_name, SUM(cost) AS attributed_cost
+    FROM cat.job_cost
+    GROUP BY run_date, pool_name
+),
+non_pool_d AS (
+    SELECT run_date, SUM(pre_tax_cost) AS residual_cost
+    FROM cat.raw_cost
+    WHERE pool_name IS NULL
+    GROUP BY run_date
+),
+pool_joined AS (
+    SELECT r.run_date,
+           r.raw_pool_cost,
+           COALESCE(j.attributed_cost, 0) AS attributed_cost
+    FROM raw_pd r
+    LEFT JOIN job_pd j
+      ON j.run_date = r.run_date AND j.pool_name = r.pool_name
+),
+pool_daily AS (
+    SELECT run_date,
+           SUM(raw_pool_cost)                      AS raw_pool_cost,
+           SUM(attributed_cost)                    AS attributed_cost,
+           SUM(raw_pool_cost - attributed_cost)    AS idle_cost
+    FROM pool_joined
+    GROUP BY run_date
+)
+SELECT
+    DATE_TRUNC('month', p.run_date)                        AS month,
+    ROUND(SUM(p.attributed_cost)::numeric, 2)              AS attributed_pool_cost,
+    ROUND(SUM(p.idle_cost)::numeric, 2)                    AS idle_cost,
+    ROUND(SUM(COALESCE(n.residual_cost, 0))::numeric, 2)   AS residual_cost_1b
+FROM pool_daily p
+LEFT JOIN non_pool_d n ON n.run_date = p.run_date
+GROUP BY 1
+ORDER BY 1;
+
 SELECT
     DATE_TRUNC('month', d.run_date)                                   AS month,
     ROUND(SUM(d.attributed_cost)::numeric, 2)                         AS attributed_pool_cost,
