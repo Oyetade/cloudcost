@@ -330,5 +330,28 @@ FROM cat.job_cost
 WHERE job_team = 'RMT_Webapps'
 GROUP BY 1 ORDER BY first_seen;
 
+--Unknown is now the largest single risk to product 2. Not because 6–12% is fatal, but because it is rising with variance and nobody has been watching. At 23.6%, a team-level forecast is quietly saying "one pound in four belongs to -nobody."
+--Two things worth doing.
+--The precise date, rather than the month:
+
+SELECT run_date,
+       ROUND(SUM(cost) FILTER (WHERE job_team = 'Unknown')::numeric, 2) AS unknown_cost,
+       ROUND(100.0 * SUM(cost) FILTER (WHERE job_team = 'Unknown')
+             / NULLIF(SUM(cost), 0), 1) AS unknown_pct
+FROM cat.job_cost
+WHERE run_date BETWEEN DATE '2025-03-15' AND DATE '2025-06-15'
+GROUP BY 1 ORDER BY 1;
+
+Step on a single date means a rule deployment. Ramp means jobs drifting out of coverage as new work arrives untagged. Different problems, different owners.
+And what the unowned work actually is:
+
+SELECT job_name, COUNT(DISTINCT run_date) AS days,
+       MIN(run_date) AS first_seen,
+       ROUND(SUM(cost)::numeric, 2) AS total_cost
+FROM cat.job_cost
+WHERE job_team = 'Unknown' AND run_date >= DATE '2025-05-01'
+GROUP BY 1 ORDER BY total_cost DESC LIMIT 20;
+
+
 
 
