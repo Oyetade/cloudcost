@@ -383,3 +383,12 @@ GROUP BY 1
 HAVING COUNT(DISTINCT update_time) > 1
 ORDER BY writes DESC LIMIT 20;
 
+SELECT run_date, subscription_id, COUNT(DISTINCT update_time) AS writes
+FROM cat.raw_cost
+WHERE run_date >= DATE '2025-06-01'
+GROUP BY 1, 2
+ORDER BY writes DESC
+LIMIT 20;
+
+SELECT COUNT(DISTINCT subscription_id) FROM cat.raw_cost WHERE run_date >= DATE '2025-06-01';
+
