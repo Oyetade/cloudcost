@@ -353,5 +353,23 @@ WHERE job_team = 'Unknown' AND run_date >= DATE '2025-05-01'
 GROUP BY 1 ORDER BY total_cost DESC LIMIT 20;
 
 
+SELECT job_team, MIN(run_date), MAX(run_date), COUNT(DISTINCT run_date) AS days
+FROM cat.job_cost
+WHERE job_name = 'rmt_api'
+GROUP BY 1 ORDER BY 2;
+
+WITH bad AS (
+    SELECT run_date,
+           100.0 * SUM(cost) FILTER (WHERE job_team = 'Unknown') / NULLIF(SUM(cost),0) AS unk_pct
+    FROM cat.job_cost
+    WHERE run_date >= DATE '2024-01-02'
+    GROUP BY 1
+)
+SELECT b.run_date, ROUND(b.unk_pct::numeric,1) AS unk_pct,
+       s.run_type, s.status
+FROM bad b
+LEFT JOIN cat.run_status s ON s.run_date = b.run_date
+WHERE b.unk_pct > 40
+ORDER BY b.run_date, s.run_type;
 
 
