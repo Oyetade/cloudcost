@@ -373,3 +373,13 @@ WHERE b.unk_pct > 40
 ORDER BY b.run_date, s.run_type;
 
 
+-- how much does a day move after first write?
+SELECT run_date,
+       COUNT(DISTINCT update_time) AS writes,
+       ROUND(SUM(pre_tax_cost)::numeric, 2) AS final_cost
+FROM cat.raw_cost
+WHERE run_date >= DATE '2025-01-01'
+GROUP BY 1
+HAVING COUNT(DISTINCT update_time) > 1
+ORDER BY writes DESC LIMIT 20;
+
