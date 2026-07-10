@@ -303,7 +303,32 @@ FROM (
 ) x
 WHERE raw_pool_cost - attributed_cost < -0.005;
 
+--Unknown — one query, then a question
+--The query, because 383/day across 865 days is worth understanding before it's modelled:
+SELECT DATE_TRUNC('month', run_date) AS month,
+       ROUND(SUM(cost) FILTER (WHERE job_team = 'Unknown')::numeric, 2) AS unknown_cost,
+       ROUND(SUM(cost)::numeric, 2)                                     AS total_cost,
+       ROUND(100.0 * SUM(cost) FILTER (WHERE job_team = 'Unknown')
+             / NULLIF(SUM(cost), 0), 1)                                 AS unknown_pct
+FROM cat.job_cost
+WHERE run_date >= DATE '2024-01-02'
+GROUP BY 1 ORDER BY 1;
 
+
+--RMT_Webapps — one query, and it may not need an SME at all
+
+
+SELECT MIN(run_date) AS first_seen,
+       COUNT(DISTINCT job_name) AS distinct_jobs,
+       MIN(run_date) FILTER (WHERE run_date < DATE '2025-01-13') AS any_earlier
+FROM cat.job_cost
+WHERE job_team = 'RMT_Webapps';
+
+
+SELECT job_name, MIN(run_date) AS first_seen, COUNT(DISTINCT run_date) AS days
+FROM cat.job_cost
+WHERE job_team = 'RMT_Webapps'
+GROUP BY 1 ORDER BY first_seen;
 
 
 
