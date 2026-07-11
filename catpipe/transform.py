@@ -34,8 +34,8 @@ COST_HISTORY_START = date(2022, 8, 1)  # onboarding ramp complete; estate stable
 ACTIVITY_START = date(2023, 8, 1)   # job_usage / job_cost begin
 RUN_STATUS_START = date(2024, 1, 2)  # run_status begins; gate evaluable
 
-import assertions as A
-import features as F
+from . import assertions as A
+from . import features as F
 
 GATE_TYPES = ("Cost", "Usage", "Attribution")
 JOB_KEYS = ["run_date", "subscription_id", "batch_account_name",
@@ -267,16 +267,43 @@ def build_pool_frame(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
              task_count=("task_count", "sum"))
         .reset_index()
     )
-    concurrency = F.concurrency_by_pool_day(
-        joined, POOL_KEYS[:0] + ["subscription_id", "batch_account_name",
-                                 "pool_name"]
-    )
+
+    # Concurrency (7.4): the machine-count proxy. The sweep dates events by
+    # their timestamps, so its day column can differ from run_date for jobs
+    # spanning midnight; rename and join on the pool-day key regardless —
+    # run_date is the frame's grain and the sweep's day is its best estimate
+    # of when the concurrency occurred.
+    pool_id_keys = ["subscription_id", "batch_account_name", "pool_name"]
+    concurrency = F.concurrency_by_pool_day(joined, pool_id_keys)
+    if len(concurrency):
+        concurrency = concurrency.rename(columns={"day": "run_date"})
+
+    # Job mix (7.4): category shares, distinct-job count, largest job's
+    # share. Mix shifts precede cost shifts when a new workload ramps.
+    if len(joined):
+        job_mix = F.job_mix_by_pool_day(joined, pool_id_keys)
+    else:
+        job_mix = pd.DataFrame(
+            columns=pool_id_keys + ["run_date", "n_jobs", "largest_job_share"]
+        )
 
     # Left join from the cost target: pre-ACTIVITY_START pool-days get NaN
     # activity. That NaN is null-BY-CONSTRUCTION (we did not measure), NOT
     # zero activity (a pool that ran nothing). Never fillna(0) here; the
     # regime label explains the null and the model layer decides what to do.
     frame = target.merge(activity, on=POOL_KEYS, how="left")
+    if len(concurrency):
+        frame = frame.merge(concurrency, on=POOL_KEYS, how="left")
+    else:
+        frame["peak_concurrency"] = pd.NA
+        frame["mean_concurrency"] = pd.NA
+    if len(job_mix):
+        frame = frame.merge(job_mix, on=POOL_KEYS, how="left")
+    else:
+        frame["n_jobs"] = pd.NA
+        frame["largest_job_share"] = pd.NA
+    A.assert_row_count_identity(frame, len(target),
+                                "pool_frame x concurrency/job_mix")
     frame = stamp_regime(frame)
     frame = drop_pre_coverage(frame)
     frame = apply_gate(frame, gate, "pool_frame",

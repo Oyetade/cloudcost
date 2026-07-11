@@ -97,3 +97,82 @@ def assert_no_same_day_cost(feature_cols: list[str], context: str) -> None:
             f"{context}: unlagged cost columns in feature set: {leaks}. "
             "These are the target arriving through a side door."
         )
+
+
+def assert_partition_identity(
+    part_totals: dict[str, float], grand_total: float, context: str,
+    abs_tol: float = 0.05, rel_tol: float = 1e-6,
+) -> None:
+    """The partition check (session note section 6, the 62.43 lesson): any
+    decomposition of raw_cost must sum back to the table's grand total. A
+    partition that silently drops rows (an orphan day, a fanout, a filter
+    applied to one side only) shows up here and nowhere else. Applies to the
+    1a + 1b split in particular: pool branch + non-pool branch = everything.
+    """
+    total = float(sum(part_totals.values()))
+    gap = abs(total - float(grand_total))
+    tol = max(abs_tol, rel_tol * abs(float(grand_total)))
+    if gap > tol:
+        raise DataQualityError(
+            f"{context}: partition does not sum to the grand total. "
+            f"parts={ {k: round(v, 2) for k, v in part_totals.items()} } "
+            f"sum={total:.2f} vs total={float(grand_total):.2f} "
+            f"(gap {gap:.2f} > tol {tol:.2f}). A branch is dropping or "
+            "double-counting rows."
+        )
+
+
+def assert_one_write_per_slice(
+    raw_cost: pd.DataFrame, context: str = "raw_cost",
+    keys: tuple[str, str] = ("run_date", "subscription_id"),
+    ts_col: str = "update_time",
+) -> None:
+    """The append-only invariant (question register Q1, resolved 10 July
+    2026): every (run_date, subscription_id) slice of raw_cost has exactly
+    one update_time — one write, never rewritten. Back-tests being
+    point-in-time correct, and the detector needing no maturity rule, both
+    REST on this. The loader has upsert capability that has never fired;
+    this check is the tripwire for the day it does. Run it on every fresh
+    extract.
+    """
+    if ts_col not in raw_cost.columns or raw_cost.empty:
+        return
+    n_ts = raw_cost.groupby(list(keys), observed=True)[ts_col].nunique()
+    rewritten = n_ts[n_ts > 1]
+    if len(rewritten):
+        sample = rewritten.head(3).index.tolist()
+        raise DataQualityError(
+            f"{context}: {len(rewritten)} (run_date, subscription) slices "
+            f"carry more than one {ts_col} — the loader's upsert has fired "
+            f"and the append-only assumption (Q1) no longer holds. "
+            f"Point-in-time back-test claims are void until re-established. "
+            f"Examples: {sample}"
+        )
+
+
+def report_duplicate_rate(
+    df: pd.DataFrame, keys: list[str], table: str
+) -> dict:
+    """Duplicate REPORT, not assertion, for grains that are still an open
+    question. The 1b candidate key (run_date, subscription, resource_group,
+    resource_type, meter) may legitimately repeat until the SMEs name the
+    stable resource identifier (register Q7): two storage accounts in one
+    resource group bill the same meter on the same day. The daily SUM is
+    robust to that ambiguity; what it is not robust to is literal
+    double-loading, which assert_no_duplicates on the full row guards
+    separately. This reports the rate so the frame carries the number and
+    Q7's answer can be checked against it.
+    """
+    dup = df.duplicated(subset=keys, keep=False)
+    n = int(dup.sum())
+    return {
+        "table": table,
+        "keys": keys,
+        "rows": int(len(df)),
+        "duplicate_rows": n,
+        "duplicate_rate": (n / len(df)) if len(df) else 0.0,
+        "examples": (
+            df.loc[dup, keys].drop_duplicates().head(3).to_dict("records")
+            if n else []
+        ),
+    }

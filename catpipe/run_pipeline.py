@@ -28,7 +28,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import extract, reconcile, transform
+from . import assertions, extract, frames, reconcile, transform
 
 
 def build_frames(snapshot_dir: str | Path) -> dict:
@@ -44,6 +44,11 @@ def build_frames(snapshot_dir: str | Path) -> dict:
             "Re-run with --extract, or check the snapshot path."
         )
 
+    # Q1's tripwire on every snapshot: the append-only invariant that
+    # point-in-time back-tests rest on. Cheap, and the day the loader's
+    # upsert fires, this is what says so.
+    assertions.assert_one_write_per_slice(tables["raw_cost"])
+
     pool = transform.build_pool_frame(tables)
     team = transform.build_team_frame(tables)
 
@@ -52,6 +57,43 @@ def build_frames(snapshot_dir: str | Path) -> dict:
 
     return {"pool": pool, "team": team,
             "reconciliation": recon, "recon_summary": summary}
+
+
+def build_ml_frames(snapshot_dir: str | Path) -> dict:
+    """The three model-ready frames of frames.py: 1a (pool), 1b (non-pool
+    segments) and 2 (team). Returns {name: frame}; each frame carries its
+    target, feature list and reports in .attrs.
+    """
+    tables = transform.load_snapshot(snapshot_dir)
+    assertions.assert_one_write_per_slice(tables["raw_cost"])
+    return {
+        "frame_1a": frames.build_frame_1a(tables),
+        "frame_1b": frames.build_frame_1b(tables),
+        "frame_2": frames.build_frame_2(tables),
+    }
+
+
+def _write_ml_frames(ml: dict, out_dir: Path) -> None:
+    """Parquet per frame plus a manifest carrying what parquet cannot:
+    the declared feature lists, categoricals, and the orphan/grain reports.
+    The manifest is the reviewer's single place to see exactly what each
+    model is allowed to know.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    manifest = {}
+    for name, frame in ml.items():
+        frame.to_parquet(out_dir / f"{name}.parquet", index=False)
+        manifest[name] = {
+            "rows": len(frame),
+            "target": frame.attrs.get("target"),
+            "feature_cols": frame.attrs.get("feature_cols"),
+            "categorical_cols": frame.attrs.get("categorical_cols"),
+            "train_origin": frame.attrs.get("train_origin"),
+            "orphan_report": frame.attrs.get("orphan_report"),
+            "grain_report": frame.attrs.get("grain_report"),
+        }
+    (out_dir / "ml_manifest.json").write_text(
+        json.dumps(manifest, indent=2, default=str))
 
 
 def _write_frames(result: dict, out_dir: Path) -> None:
@@ -91,6 +133,9 @@ def main(argv=None) -> int:
                    help="Root dir for snapshots and frames.")
     p.add_argument("--reconcile-only", action="store_true",
                    help="Only run the target-choice reconciliation.")
+    p.add_argument("--ml-frames", action="store_true",
+                   help="Also build the model-ready ML frames (1a, 1b, 2) "
+                        "and write them with a feature manifest.")
     args = p.parse_args(argv)
 
     if args.extract:
@@ -118,6 +163,16 @@ def main(argv=None) -> int:
     _write_frames(result, Path(snapshot_dir) / "frames")
     _print_report(result)
     print(f"Frames written to {Path(snapshot_dir) / 'frames'}")
+
+    if args.ml_frames:
+        ml = build_ml_frames(snapshot_dir)
+        out = Path(snapshot_dir) / "frames"
+        _write_ml_frames(ml, out)
+        for name, frame in ml.items():
+            n_feat = len(frame.attrs.get("feature_cols") or [])
+            print(f"  {name}: {len(frame):>7} rows, {n_feat} features "
+                  f"-> {out / (name + '.parquet')}")
+        print(f"Feature manifest: {out / 'ml_manifest.json'}")
     return 0
 
 

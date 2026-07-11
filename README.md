@@ -38,6 +38,8 @@ closes, only the extract predicate changes; nothing downstream moves.
 | `assertions.py` | Reusable invariants; raise `DataQualityError` | 7.1, 7.5, 7.3 |
 | `features.py` | Concurrency sweep, job-mix | 7.4 |
 | `transform.py` | Gate, join, mask, frame assembly | 7.3, 7.5, 5.4 |
+| `feature_factory.py` | Lags, rolls ending at t-1, calendar leads, gate-aware padding, price drift | 5.5, 7.3, 7.4, A.2 |
+| `frames.py` | Model-ready frames: 1a (pool), 1b (non-pool segments), 2 (team) | Appendix A |
 | `reconcile.py` | Pool-day job_cost vs raw_cost: the target-choice diagnostic | 3.3, target choice |
 
 ## Which cost is the physical target? (reconcile.py)
@@ -91,7 +93,7 @@ product, so it cannot dishonestly start in 2023 for a gated model.
 
 ## What the tests cover
 
-`pytest tests/` — 57 tests. The ones that matter:
+`pytest tests/` — 108 tests. The ones that matter:
 
 - **Concurrency sweep** — overlap, sequential, instantaneous handover (no
   false peak), independent pools, null-time drop, triple overlap.
@@ -124,11 +126,43 @@ product, so it cannot dishonestly start in 2023 for a gated model.
 - Concurrency is a machine-count *proxy*; if a truer node count exists it
   should replace the sweep.
 
+## The ML frames (frames.py, July 2026)
+
+`--ml-frames` builds the three Appendix A training frames on top of the
+transform layer, writing one parquet per frame plus `ml_manifest.json`, which
+declares each frame's target, feature list and categoricals — the single
+place a reviewer looks to see exactly what each model is allowed to know.
+
+- **frame_1a** (pool): raw_cost pool target x job_usage activity through the
+  five-key join, with concurrency and job-mix now wired in (they were
+  computed but never merged), padded gate-aware per pool, lagged and rolled,
+  price-drift per pool, enriched from environment_config (tier, sub-tier,
+  derived neu/weu region).
+- **frame_1b** (non-pool, rebuilt per A.2): the null-pool slice segmented
+  into vm_compute / platform, aggregated per subscription-segment-day on a
+  SHARED date spine, guarded by the partition identity (pool branch +
+  non-pool branch = raw_cost grand total, asserted before anything is
+  dropped), full-row duplicate assertion plus a candidate-key duplicate
+  REPORT pending Q7's stable resource identifier. Effective-price drift
+  (14d vs prior 28d, catches steps and glides) replaces the repr_30d flag.
+  `post_glide` marks the 2025-02-01 origin; `training_slice_1b` selects it.
+- **frame_2** (team): job_cost target per team-day on a complete day x team
+  grid (sum over teams = total attributed cost, asserted), NULL team kept
+  distinct as __NULL_TEAM__, activity per team via the five-key join,
+  category mix shares, and `unknown_pct` per day — one computation feeding
+  both the A.3 frame filter (`filter_unknown`) and the A.4 rule.
+
+Every feature is lagged or calendar-known, enforced by
+`assert_no_same_day_cost` on the declared feature list. The append-only
+invariant (Q1) is re-checked on every snapshot via
+`assert_one_write_per_slice` — the tripwire for the day the loader's upsert
+fires.
+
 ## Not yet built (deliberately)
 
-Lagging and calendar-lead feature construction (kept out of the skeleton so
-the join/gate logic stays legible), the non-pool residual (product 1b), and
-the anomaly detector — all of which reuse these frames.
+Baselines and the walk-forward harness (build-order item 4), the quantile
+GBMs themselves, and the anomaly detector's scoring loop — all of which
+consume these frames.
 
 ## Gotchas learned from real data
 
@@ -175,6 +209,9 @@ PYTHONPATH=. python -m catpipe.run_pipeline --extract --out ./snapshots
 
 # build frames from an existing snapshot (skips the database):
 PYTHONPATH=. python -m catpipe.run_pipeline --snapshot ./snapshots/<timestamp>
+
+# frames plus the three model-ready ML frames and their feature manifest:
+PYTHONPATH=. python -m catpipe.run_pipeline --snapshot ./snapshots/<ts> --ml-frames
 
 # just the target-choice reconciliation:
 PYTHONPATH=. python -m catpipe.run_pipeline --snapshot ./snapshots/<ts> --reconcile-only
