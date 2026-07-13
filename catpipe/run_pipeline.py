@@ -28,7 +28,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import (assertions, baselines, extract, frames, harness,
+from . import (assertions, baselines, extract, frames, harness, models,
                reconcile, transform)
 
 
@@ -97,7 +97,19 @@ def _write_ml_frames(ml: dict, out_dir: Path) -> None:
         json.dumps(manifest, indent=2, default=str))
 
 
-def backtest_baselines(ml: dict) -> dict:
+def _models_for(frame, include_gbm: bool) -> list:
+    """The model list for one frame: always the F3 baselines; plus the
+    quantile GBM built from the frame's own declared features when asked.
+    The GBM import error (lightgbm pending approval) is allowed to surface
+    here, loudly, rather than being swallowed into a half-run backtest.
+    """
+    out = list(baselines.all_baselines())
+    if include_gbm:
+        out.append(models.QuantileGBM.for_frame(frame))
+    return out
+
+
+def backtest_baselines(ml: dict, include_gbm: bool = False) -> dict:
     """Build-order item 4 in motion: the F3 baselines through the shared
     walk-forward harness, per frame, each on its own honest window (5.7):
 
@@ -118,7 +130,7 @@ def backtest_baselines(ml: dict) -> dict:
     for name, frame in ml.items():
         try:
             summary, ledger = harness.run_models(
-                frame, baselines.all_baselines(),
+                frame, _models_for(frame, include_gbm),
                 mask=masks[name](frame))
             out[name] = {"summary": summary, "ledger": ledger}
         except harness.BacktestError as e:
@@ -196,6 +208,9 @@ def main(argv=None) -> int:
                    help="Run the F3 baselines through the monthly "
                         "walk-forward on each ML frame (implies --ml-frames)"
                         " and write summaries + prediction ledgers.")
+    p.add_argument("--gbm", action="store_true",
+                   help="Add the quantile GBM (A.1/A.2/A.3) to the backtest"
+                        " model list. Requires lightgbm; implies --backtest.")
     args = p.parse_args(argv)
 
     if args.extract:
@@ -224,6 +239,8 @@ def main(argv=None) -> int:
     _print_report(result)
     print(f"Frames written to {Path(snapshot_dir) / 'frames'}")
 
+    if args.gbm:
+        args.backtest = True
     if args.ml_frames or args.backtest:
         ml = build_ml_frames(snapshot_dir)
         out = Path(snapshot_dir) / "frames"
@@ -235,7 +252,7 @@ def main(argv=None) -> int:
         print(f"Feature manifest: {out / 'ml_manifest.json'}")
 
     if args.backtest:
-        bt = backtest_baselines(ml)
+        bt = backtest_baselines(ml, include_gbm=args.gbm)
         _write_backtests(bt, Path(snapshot_dir) / "frames")
         _print_backtests(bt)
     return 0

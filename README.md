@@ -42,6 +42,7 @@ closes, only the extract predicate changes; nothing downstream moves.
 | `frames.py` | Model-ready frames: 1a (pool), 1b (non-pool segments), 2 (team) | Appendix A |
 | `baselines.py` | F3 baselines: seasonal naive, 3-month trend (the incumbent), rolling 28-day median | F3, 5.6 |
 | `harness.py` | Monthly walk-forward: honest per-product origins, quantile metrics, prediction ledger | 5.4, 5.7 |
+| `models.py` | Quantile GBM (LightGBM, lazy import pending approval): one class for A.1, A.2, A.3 | A.1-A.3, 7.3 |
 | `reconcile.py` | Pool-day job_cost vs raw_cost: the target-choice diagnostic | 3.3, target choice |
 
 ## Which cost is the physical target? (reconcile.py)
@@ -95,7 +96,7 @@ product, so it cannot dishonestly start in 2023 for a gated model.
 
 ## What the tests cover
 
-`pytest tests/` — 126 tests. The ones that matter:
+`pytest tests/` — 137 tests. The ones that matter:
 
 - **Concurrency sweep** — overlap, sequential, instantaneous handover (no
   false peak), independent pools, null-time drop, triple overlap.
@@ -178,12 +179,34 @@ prediction ledger parquet per frame — keep the ledger, since metrics can be
 recomputed from it but not the reverse. Any future model that implements
 fit / predict-quantiles runs through the identical folds.
 
+## The quantile GBM (models.py, July 2026)
+
+`--gbm` (implies `--backtest`) adds `QuantileGBM` to the model list: three
+LightGBM boosters with quantile objectives at 5/50/95, built per frame from
+the frame's OWN declared feature list (`QuantileGBM.for_frame`), so the
+manifest remains the single statement of what the model knows. Native
+categoricals with levels frozen at fit (unseen categories map to missing,
+never a fresh code); asinh target transform by default because padded
+frames legitimately contain zero-cost days (quantiles invert exactly under
+monotone transforms); chronological-tail early stopping, then a refit on
+the full window at the stopped round; per-row quantile sorting so intervals
+never cross; predictions floored at zero. `feature_importance()` exposes
+gain on the median booster — the first instalment of the charter's
+'explain' verb.
+
+lightgbm is NOT in the approved stack and the import is lazy: the package
+imports, and baselines + harness run, without it; instantiating the GBM
+without it raises a message naming the approval situation. The GBM's known
+calibration gap (quantile GBMs under-cover; observed ~0.82 vs the 0.90
+target on synthetics) is the detector's business: conformal widening sits
+on top of the harness's coverage numbers when A.4 Layer 1 is built.
+
 ## Not yet built (deliberately)
 
-The quantile GBMs themselves (LightGBM pending software approval — the
-harness's model interface is where they plug in), and the anomaly detector's
-scoring loop, whose Layer 1 numbers fall out of the interval metrics the
-harness already computes.
+The anomaly detector's scoring loop (A.4): Layer 1 consumes the GBM
+intervals the harness already scores, Layer 2 is the per-(job_name, pool)
+robust-z profile, Layer 1.5 the CUSUM drift rule, plus the unknown_pct rule
+already computed on frame 2.
 
 ## Gotchas learned from real data
 
@@ -236,6 +259,9 @@ PYTHONPATH=. python -m catpipe.run_pipeline --snapshot ./snapshots/<ts> --ml-fra
 
 # ...and the F3 baseline walk-forward on every frame (implies --ml-frames):
 PYTHONPATH=. python -m catpipe.run_pipeline --snapshot ./snapshots/<ts> --backtest
+
+# ...adding the quantile GBM to the same folds (requires lightgbm):
+PYTHONPATH=. python -m catpipe.run_pipeline --snapshot ./snapshots/<ts> --gbm
 
 # just the target-choice reconciliation:
 PYTHONPATH=. python -m catpipe.run_pipeline --snapshot ./snapshots/<ts> --reconcile-only
