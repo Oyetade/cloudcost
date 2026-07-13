@@ -28,7 +28,8 @@ import os
 import sys
 from pathlib import Path
 
-from . import assertions, extract, frames, reconcile, transform
+from . import (assertions, baselines, extract, frames, harness,
+               reconcile, transform)
 
 
 def build_frames(snapshot_dir: str | Path) -> dict:
@@ -96,6 +97,61 @@ def _write_ml_frames(ml: dict, out_dir: Path) -> None:
         json.dumps(manifest, indent=2, default=str))
 
 
+def backtest_baselines(ml: dict) -> dict:
+    """Build-order item 4 in motion: the F3 baselines through the shared
+    walk-forward harness, per frame, each on its own honest window (5.7):
+
+      frame_1a  featured_gated only
+      frame_1b  featured_gated AND post_glide (origin >= 2025-02-01)
+      frame_2   featured_gated AND unknown_pct <= 0.20 (the A.3 filter)
+
+    Returns {frame_name: {"summary": DataFrame, "ledger": DataFrame}}.
+    A frame whose honest window is still too short for a single fold is
+    reported as such rather than scored dishonestly.
+    """
+    masks = {
+        "frame_1a": lambda f: None,
+        "frame_1b": lambda f: f["post_glide"],
+        "frame_2": lambda f: f["unknown_pct"] <= 0.20,
+    }
+    out = {}
+    for name, frame in ml.items():
+        try:
+            summary, ledger = harness.run_models(
+                frame, baselines.all_baselines(),
+                mask=masks[name](frame))
+            out[name] = {"summary": summary, "ledger": ledger}
+        except harness.BacktestError as e:
+            out[name] = {"error": str(e)}
+    return out
+
+
+def _write_backtests(bt: dict, out_dir: Path) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    report = {}
+    for name, res in bt.items():
+        if "error" in res:
+            report[name] = {"error": res["error"]}
+            continue
+        res["ledger"].to_parquet(out_dir / f"backtest_{name}_ledger.parquet",
+                                 index=False)
+        report[name] = res["summary"].to_dict(orient="records")
+    (out_dir / "backtest_summary.json").write_text(
+        json.dumps(report, indent=2, default=str))
+
+
+def _print_backtests(bt: dict) -> None:
+    print("\nBASELINE WALK-FORWARD (F3), per frame")
+    print("-" * 68)
+    for name, res in bt.items():
+        if "error" in res:
+            print(f"  {name}: not scoreable -- {res['error']}")
+            continue
+        print(f"  {name}:")
+        cols = ["model", "mae_daily", "monthly_pct_err", "coverage_90"]
+        print(res["summary"][cols].to_string(index=False))
+
+
 def _write_frames(result: dict, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     result["pool"].to_parquet(out_dir / "frame_pool.parquet", index=False)
@@ -136,6 +192,10 @@ def main(argv=None) -> int:
     p.add_argument("--ml-frames", action="store_true",
                    help="Also build the model-ready ML frames (1a, 1b, 2) "
                         "and write them with a feature manifest.")
+    p.add_argument("--backtest", action="store_true",
+                   help="Run the F3 baselines through the monthly "
+                        "walk-forward on each ML frame (implies --ml-frames)"
+                        " and write summaries + prediction ledgers.")
     args = p.parse_args(argv)
 
     if args.extract:
@@ -164,7 +224,7 @@ def main(argv=None) -> int:
     _print_report(result)
     print(f"Frames written to {Path(snapshot_dir) / 'frames'}")
 
-    if args.ml_frames:
+    if args.ml_frames or args.backtest:
         ml = build_ml_frames(snapshot_dir)
         out = Path(snapshot_dir) / "frames"
         _write_ml_frames(ml, out)
@@ -173,6 +233,11 @@ def main(argv=None) -> int:
             print(f"  {name}: {len(frame):>7} rows, {n_feat} features "
                   f"-> {out / (name + '.parquet')}")
         print(f"Feature manifest: {out / 'ml_manifest.json'}")
+
+    if args.backtest:
+        bt = backtest_baselines(ml)
+        _write_backtests(bt, Path(snapshot_dir) / "frames")
+        _print_backtests(bt)
     return 0
 
 

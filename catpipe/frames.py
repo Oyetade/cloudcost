@@ -192,6 +192,7 @@ def build_frame_1a(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     frame.attrs["target"] = "cost"
     frame.attrs["feature_cols"] = feature_cols
     frame.attrs["categorical_cols"] = categoricals
+    frame.attrs["group_keys"] = list(POOL_ID_KEYS)
     frame.attrs["orphan_report"] = pool.attrs.get("orphan_report", {})
     return frame
 
@@ -336,6 +337,7 @@ def build_frame_1b(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     frame.attrs["target"] = "cost"
     frame.attrs["feature_cols"] = feature_cols
     frame.attrs["categorical_cols"] = categoricals
+    frame.attrs["group_keys"] = ["subscription_id", "segment"]
     frame.attrs["grain_report"] = grain_report
     frame.attrs["train_origin"] = TRAIN_ORIGIN_1B.isoformat()
     return frame
@@ -503,6 +505,7 @@ def build_frame_2(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     frame.attrs["target"] = "cost"
     frame.attrs["feature_cols"] = feature_cols
     frame.attrs["categorical_cols"] = ["job_team"]
+    frame.attrs["group_keys"] = ["job_team"]
     frame.attrs["orphan_report"] = orphans
     return frame
 

@@ -40,6 +40,8 @@ closes, only the extract predicate changes; nothing downstream moves.
 | `transform.py` | Gate, join, mask, frame assembly | 7.3, 7.5, 5.4 |
 | `feature_factory.py` | Lags, rolls ending at t-1, calendar leads, gate-aware padding, price drift | 5.5, 7.3, 7.4, A.2 |
 | `frames.py` | Model-ready frames: 1a (pool), 1b (non-pool segments), 2 (team) | Appendix A |
+| `baselines.py` | F3 baselines: seasonal naive, 3-month trend (the incumbent), rolling 28-day median | F3, 5.6 |
+| `harness.py` | Monthly walk-forward: honest per-product origins, quantile metrics, prediction ledger | 5.4, 5.7 |
 | `reconcile.py` | Pool-day job_cost vs raw_cost: the target-choice diagnostic | 3.3, target choice |
 
 ## Which cost is the physical target? (reconcile.py)
@@ -93,7 +95,7 @@ product, so it cannot dishonestly start in 2023 for a gated model.
 
 ## What the tests cover
 
-`pytest tests/` — 108 tests. The ones that matter:
+`pytest tests/` — 126 tests. The ones that matter:
 
 - **Concurrency sweep** — overlap, sequential, instantaneous handover (no
   false peak), independent pools, null-time drop, triple overlap.
@@ -158,11 +160,30 @@ invariant (Q1) is re-checked on every snapshot via
 `assert_one_write_per_slice` — the tripwire for the day the loader's upsert
 fires.
 
+## Baselines and the harness (baselines.py / harness.py, July 2026)
+
+`--backtest` runs the F3 trio (3-month trend reproducing the incumbent,
+seasonal naive, rolling 28-day median) through a single monthly walk-forward
+harness, per frame, each on its own honest window: frame 1a on
+featured_gated, frame 1b additionally masked to post_glide, frame 2
+additionally masked to unknown_pct <= 0.20. Baselines FREEZE AT THE ORIGIN
+(no peeking inside the test month — direct horizons per 5.4) and carry
+empirical intervals from their own in-training residuals, so the harness is
+quantile-shaped before any GBM exists. An origin whose training window would
+predate the frame's honest regime is refused with an error, never silently
+accepted. Metrics per model: daily MAE, monthly aggregate percentage error
+(the stakeholder number), pinball loss at 5/50/95, and 5–95 interval
+coverage against the 0.90 target. Outputs: `backtest_summary.json` and one
+prediction ledger parquet per frame — keep the ledger, since metrics can be
+recomputed from it but not the reverse. Any future model that implements
+fit / predict-quantiles runs through the identical folds.
+
 ## Not yet built (deliberately)
 
-Baselines and the walk-forward harness (build-order item 4), the quantile
-GBMs themselves, and the anomaly detector's scoring loop — all of which
-consume these frames.
+The quantile GBMs themselves (LightGBM pending software approval — the
+harness's model interface is where they plug in), and the anomaly detector's
+scoring loop, whose Layer 1 numbers fall out of the interval metrics the
+harness already computes.
 
 ## Gotchas learned from real data
 
@@ -212,6 +233,9 @@ PYTHONPATH=. python -m catpipe.run_pipeline --snapshot ./snapshots/<timestamp>
 
 # frames plus the three model-ready ML frames and their feature manifest:
 PYTHONPATH=. python -m catpipe.run_pipeline --snapshot ./snapshots/<ts> --ml-frames
+
+# ...and the F3 baseline walk-forward on every frame (implies --ml-frames):
+PYTHONPATH=. python -m catpipe.run_pipeline --snapshot ./snapshots/<ts> --backtest
 
 # just the target-choice reconciliation:
 PYTHONPATH=. python -m catpipe.run_pipeline --snapshot ./snapshots/<ts> --reconcile-only
