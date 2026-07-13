@@ -28,8 +28,8 @@ import os
 import sys
 from pathlib import Path
 
-from . import (assertions, baselines, extract, frames, harness, models,
-               reconcile, transform)
+from . import (assertions, baselines, calibrate, extract, frames,
+               harness, models, reconcile, transform)
 
 
 def build_frames(snapshot_dir: str | Path) -> dict:
@@ -105,7 +105,13 @@ def _models_for(frame, include_gbm: bool) -> list:
     """
     out = list(baselines.all_baselines())
     if include_gbm:
+        # raw AND conformally calibrated, side by side: the summary then
+        # shows the coverage gap (~0.82 raw vs the 0.90 target) and its
+        # correction on the same folds. A.4 Layer 1 alerts on the
+        # CALIBRATED intervals, via the same calibrate.py machinery.
         out.append(models.QuantileGBM.for_frame(frame))
+        out.append(calibrate.ConformalWrapper(
+            models.QuantileGBM.for_frame(frame)))
     return out
 
 

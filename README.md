@@ -43,6 +43,7 @@ closes, only the extract predicate changes; nothing downstream moves.
 | `baselines.py` | F3 baselines: seasonal naive, 3-month trend (the incumbent), rolling 28-day median | F3, 5.6 |
 | `harness.py` | Monthly walk-forward: honest per-product origins, quantile metrics, prediction ledger | 5.4, 5.7 |
 | `models.py` | Quantile GBM (LightGBM, lazy import pending approval): one class for A.1, A.2, A.3 | A.1-A.3, 7.3 |
+| `calibrate.py` | Conformal (CQR) calibration: wrapper for any forecaster + ledger functions A.4 reuses | A.4 Layer 1 |
 | `reconcile.py` | Pool-day job_cost vs raw_cost: the target-choice diagnostic | 3.3, target choice |
 
 ## Which cost is the physical target? (reconcile.py)
@@ -96,7 +97,7 @@ product, so it cannot dishonestly start in 2023 for a gated model.
 
 ## What the tests cover
 
-`pytest tests/` — 137 tests. The ones that matter:
+`pytest tests/` — 150 tests. The ones that matter:
 
 - **Concurrency sweep** — overlap, sequential, instantaneous handover (no
   false peak), independent pools, null-time drop, triple overlap.
@@ -201,12 +202,38 @@ calibration gap (quantile GBMs under-cover; observed ~0.82 vs the 0.90
 target on synthetics) is the detector's business: conformal widening sits
 on top of the harness's coverage numbers when A.4 Layer 1 is built.
 
+## Conformal calibration (calibrate.py, July 2026)
+
+Quantile GBMs systematically under-cover (~0.82 observed against the 0.90
+target); uncorrected, A.4 Layer 1 would fire nearly twice its design rate
+and the alert table would decay into ignored noise. calibrate.py implements
+CQR (conformalised quantile regression): score how far each held-out actual
+escaped its interval — max(q05 - y, y - q95), negative when comfortably
+inside — take the finite-sample (n+1)-corrected quantile of the scores, and
+widen (or, for an over-wide model, SHRINK) every future interval by that
+margin. Scaled by default, so a volatile wide-band day receives more
+absolute widening than a quiet one; per-group margins where the calibration
+window is dense, pooled fallback where thin; the median is never touched.
+Split-conformal gives at least the target coverage in finite samples
+regardless of the model's miscalibration — the same assert-don't-assume
+move as the gate and the partition identity, applied to probability claims.
+
+Two entry points, one implementation: `ConformalWrapper` wraps any harness
+forecaster (chronological calibration tail at fit, widened intervals at
+predict, `calibration_report` kept for the audit trail); `conformal_margins`
+/ `apply_margins` are pure ledger functions, which is what A.4 Layer 1
+reuses nightly against the trailing production ledger before the exceedance
+rule runs. `--gbm` now backtests the raw and calibrated GBM side by side so
+the coverage correction is visible on identical folds; observed on the
+quarter-end synthetic: identical point accuracy, coverage 0.816 -> 0.868,
+pinball_95 slightly improved (the widening is information, not padding).
+
 ## Not yet built (deliberately)
 
-The anomaly detector's scoring loop (A.4): Layer 1 consumes the GBM
-intervals the harness already scores, Layer 2 is the per-(job_name, pool)
-robust-z profile, Layer 1.5 the CUSUM drift rule, plus the unknown_pct rule
-already computed on frame 2.
+The anomaly detector's scoring loop (A.4): Layer 1 = the calibrated GBM
+intervals via calibrate.py's ledger functions plus the exceedance rule,
+Layer 2 the per-(job_name, pool) robust-z profile, Layer 1.5 the CUSUM
+drift rule, plus the unknown_pct rule already computed on frame 2.
 
 ## Gotchas learned from real data
 
