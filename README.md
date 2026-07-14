@@ -42,8 +42,10 @@ closes, only the extract predicate changes; nothing downstream moves.
 | `frames.py` | Model-ready frames: 1a (pool), 1b (non-pool segments), 2 (team) | Appendix A |
 | `baselines.py` | F3 baselines: seasonal naive, 3-month trend (the incumbent), rolling 28-day median | F3, 5.6 |
 | `harness.py` | Monthly walk-forward: honest per-product origins, quantile metrics, prediction ledger | 5.4, 5.7 |
-| `models.py` | Quantile GBM (LightGBM, lazy import pending approval): one class for A.1, A.2, A.3 | A.1-A.3, 7.3 |
+| `models.py` | Quantile GBM (LightGBM): one class for A.1, A.2, A.3 | A.1-A.3, 7.3 |
 | `calibrate.py` | Conformal (CQR) calibration: wrapper for any forecaster + ledger functions A.4 reuses | A.4 Layer 1 |
+| `detector.py` | A.4: calibrated interval exceedance, CUSUM drift, job robust-z, attribution health, alert table | A.4 |
+| `report.py` | Self-contained HTML performance report (matplotlib) | F3, charter 2.1 |
 | `reconcile.py` | Pool-day job_cost vs raw_cost: the target-choice diagnostic | 3.3, target choice |
 
 ## Which cost is the physical target? (reconcile.py)
@@ -97,7 +99,7 @@ product, so it cannot dishonestly start in 2023 for a gated model.
 
 ## What the tests cover
 
-`pytest tests/` — 150 tests. The ones that matter:
+`pytest tests/` — 171 tests. The ones that matter:
 
 - **Concurrency sweep** — overlap, sequential, instantaneous handover (no
   false peak), independent pools, null-time drop, triple overlap.
@@ -195,10 +197,7 @@ never cross; predictions floored at zero. `feature_importance()` exposes
 gain on the median booster — the first instalment of the charter's
 'explain' verb.
 
-lightgbm is NOT in the approved stack and the import is lazy: the package
-imports, and baselines + harness run, without it; instantiating the GBM
-without it raises a message naming the approval situation. The GBM's known
-calibration gap (quantile GBMs under-cover; observed ~0.82 vs the 0.90
+The GBM's known calibration gap (quantile GBMs under-cover; observed ~0.82 vs the 0.90
 target on synthetics) is the detector's business: conformal widening sits
 on top of the harness's coverage numbers when A.4 Layer 1 is built.
 
@@ -228,12 +227,41 @@ the coverage correction is visible on identical folds; observed on the
 quarter-end synthetic: identical point accuracy, coverage 0.816 -> 0.868,
 pinball_95 slightly improved (the widening is information, not padding).
 
+## The detector (detector.py, July 2026)
+
+`--detect` (implies `--backtest`) runs A.4 over the backtest ledgers and the
+snapshot, writing `alerts.parquet`. Four layers, one table:
+
+Layer 1, calibrated interval exceedance: for each scored day, conformal
+margins are recomputed from the trailing 90-day ledger window (the
+calibrate.py reuse, margins STRICTLY PAST so a spike never softens its own
+alarm) and the actual is tested against the calibrated band; severity is
+the scaled exceedance. Layer 1.5, CUSUM drift: residuals standardised by a
+trailing robust (MAD) sigma feed a two-sided CUSUM (k=0.5, h=5), catching
+the December-2024 failure mode — a glide that never breaches a daily
+interval; the statistic resets after each alarm so a continuing glide says
+'still drifting' repeatedly. In-control false-alarm budget ~0.8/year per
+series by design. Layer 2, job robust-z: per (job_name, pool), today's cost
+against the trailing median/MAD (never mean/std — the history contains
+exactly the spikes the profile must not learn to expect), with a new-job
+informational alert on first appearance and an absolute floor suppressing
+penny alerts. Attribution health: days whose unknown_pct (frame 2's column)
+exceeds 20% alert regardless of totals, because the completeness gate is
+blind to attribution failure.
+
+Every alert has a stable alert_id, severity, human-readable message and a
+STATUS column from day one; merge_alert_status preserves triage states
+('expected', 'investigating', ...) across re-scores, because an alert table
+nobody can triage decays into noise within a month. Injected-anomaly
+validation: spike caught same-day by both L1 and CUSUM; glide first alarmed
+7 days after onset; 1 false CUSUM alarm in 300 stationary days; L1
+normal-period escape rate 8.7% against the 10% design.
+
 ## Not yet built (deliberately)
 
-The anomaly detector's scoring loop (A.4): Layer 1 = the calibrated GBM
-intervals via calibrate.py's ledger functions plus the exceedance rule,
-Layer 2 the per-(job_name, pool) robust-z profile, Layer 1.5 the CUSUM
-drift rule, plus the unknown_pct rule already computed on frame 2.
+Production serving (nightly scoring against live predictions rather than
+backtest replay), the scenario engine (M5, deferred), and the triage UI —
+the alert table's status column is its contract.
 
 ## Gotchas learned from real data
 
@@ -287,8 +315,14 @@ PYTHONPATH=. python -m catpipe.run_pipeline --snapshot ./snapshots/<ts> --ml-fra
 # ...and the F3 baseline walk-forward on every frame (implies --ml-frames):
 PYTHONPATH=. python -m catpipe.run_pipeline --snapshot ./snapshots/<ts> --backtest
 
-# ...adding the quantile GBM to the same folds (requires lightgbm):
+# ...adding the quantile GBM to the same folds:
 PYTHONPATH=. python -m catpipe.run_pipeline --snapshot ./snapshots/<ts> --gbm
+
+# ...and the A.4 detector over the ledgers + snapshot:
+PYTHONPATH=. python -m catpipe.run_pipeline --snapshot ./snapshots/<ts> --detect
+
+# ...plus a self-contained HTML report with charts (combinable with the above):
+PYTHONPATH=. python -m catpipe.run_pipeline --snapshot ./snapshots/<ts> --detect --report
 
 # just the target-choice reconciliation:
 PYTHONPATH=. python -m catpipe.run_pipeline --snapshot ./snapshots/<ts> --reconcile-only

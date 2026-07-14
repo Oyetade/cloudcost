@@ -1,8 +1,4 @@
-"""QuantileGBM (build-order item 5). Every test here skips cleanly when
-lightgbm is not installed, because the library is pending software approval
-and the rest of catpipe must not depend on it. The module import itself is
-tested unconditionally — lazy import is the contract.
-"""
+"""QuantileGBM (build-order item 5)."""
 
 from datetime import date, timedelta
 
@@ -12,9 +8,7 @@ import pytest
 
 from catpipe import baselines as B
 from catpipe import harness as H
-from catpipe import models as M  # must import WITHOUT lightgbm installed
-
-lgb = pytest.importorskip("lightgbm")
+from catpipe import models as M
 
 FAST = dict(num_boost_round=300, early_stopping_rounds=25,
             params={"learning_rate": 0.1})

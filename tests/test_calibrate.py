@@ -2,8 +2,7 @@
 finite-sample quantile computed by hand, an under-covering model restored to
 target coverage on folds the margin never saw, an over-covering model
 shrunk not just widened, the scaled variant adapting to per-day dispersion,
-and the thin-group pooled fallback. GBM integration tests skip without
-lightgbm; everything else runs on the approved stack.
+and the thin-group pooled fallback.
 """
 
 from datetime import date, timedelta
@@ -191,7 +190,6 @@ class TestMarginsFromLedger:
 
 class TestWithGBM:
     def test_calibrated_gbm_coverage_improves_toward_target(self):
-        lgb = pytest.importorskip("lightgbm")
         from catpipe import models as M
         from tests.test_models import _make_frame, FAST
 

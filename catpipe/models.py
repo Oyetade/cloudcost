@@ -31,15 +31,12 @@ Design decisions, from the doc:
   tail is too thin, fall back to a fixed round count rather than validating
   on nothing.
 
-LightGBM is NOT in the approved stack (pandas, numpy, pyarrow, sqlalchemy,
-psycopg) as of July 2026; approval is in flight. The import is therefore
-lazy: this module imports cleanly everywhere, and only instantiating the
-model requires the library, with an error message that says exactly what to
-install and why. Nothing else in catpipe depends on it.
+Stack: lightgbm (approved July 2026) + pandas + numpy.
 """
 
 from __future__ import annotations
 
+import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
@@ -57,19 +54,6 @@ DEFAULT_PARAMS = {
     "verbose": -1,
     "seed": 7,
 }
-
-
-def _require_lightgbm():
-    try:
-        import lightgbm as lgb
-        return lgb
-    except ImportError as e:
-        raise ImportError(
-            "QuantileGBM needs lightgbm, which is not part of the approved "
-            "stack (pandas, numpy, pyarrow, sqlalchemy, psycopg). Install "
-            "with `pip install lightgbm` once software approval lands; the "
-            "baselines and harness run without it."
-        ) from e
 
 
 _TRANSFORMS = {
@@ -164,7 +148,6 @@ class QuantileGBM:
         return X
 
     def fit(self, train: pd.DataFrame, spec: FrameSpec) -> None:
-        lgb = _require_lightgbm()
         fwd, _ = _TRANSFORMS[self.transform]
 
         self._cat_levels = {}

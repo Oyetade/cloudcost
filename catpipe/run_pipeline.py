@@ -28,8 +28,10 @@ import os
 import sys
 from pathlib import Path
 
-from . import (assertions, baselines, calibrate, extract, frames,
-               harness, models, reconcile, transform)
+import pandas as pd
+
+from . import (assertions, baselines, calibrate, detector, extract,
+               frames, harness, models, reconcile, report, transform)
 
 
 def build_frames(snapshot_dir: str | Path) -> dict:
@@ -99,9 +101,8 @@ def _write_ml_frames(ml: dict, out_dir: Path) -> None:
 
 def _models_for(frame, include_gbm: bool) -> list:
     """The model list for one frame: always the F3 baselines; plus the
-    quantile GBM built from the frame's own declared features when asked.
-    The GBM import error (lightgbm pending approval) is allowed to surface
-    here, loudly, rather than being swallowed into a half-run backtest.
+    quantile GBM (raw and conformally calibrated) built from the frame's
+    own declared features when asked.
     """
     out = list(baselines.all_baselines())
     if include_gbm:
@@ -170,6 +171,42 @@ def _print_backtests(bt: dict) -> None:
         print(res["summary"][cols].to_string(index=False))
 
 
+LEDGER_PREFERENCE = ("quantile_gbm", "rolling_median_28",
+                     "seasonal_naive", "trend_3m")
+
+
+def run_detector_on_backtests(bt: dict, ml: dict,
+                              tables: dict,
+                              previous_alerts=None):
+    """A.4 assembled from what already exists. Layers 1 and 1.5 replay over
+    the backtest prediction ledgers — RAW model intervals, because Layer 1
+    computes its own trailing conformal margins per scored day (the
+    calibrate.py reuse). The GBM's ledger is preferred where present, the
+    strongest baseline's otherwise, so the detector demonstrates end to end
+    even before lightgbm approval. Layer 2 profiles job_cost directly; the
+    attribution rule reads frame_2's unknown_pct.
+    """
+    ledgers = {}
+    for name, res in bt.items():
+        if "ledger" not in res:
+            continue
+        led = res["ledger"]
+        # the GBM's ledger where the backtest included it, the strongest
+        # baseline's otherwise (a --detect run without --gbm)
+        model = next((m for m in LEDGER_PREFERENCE
+                      if (led["model"] == m).any()), None)
+        if model is None:
+            continue
+        gk = ml[name].attrs.get("group_keys")
+        ledgers[name] = (led[led["model"] == model].copy(), gk)
+    return detector.run_detector(
+        ledgers,
+        job_cost=tables.get("job_cost"),
+        frame_2=ml.get("frame_2"),
+        previous_alerts=previous_alerts,
+    )
+
+
 def _write_frames(result: dict, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     result["pool"].to_parquet(out_dir / "frame_pool.parquet", index=False)
@@ -216,7 +253,18 @@ def main(argv=None) -> int:
                         " and write summaries + prediction ledgers.")
     p.add_argument("--gbm", action="store_true",
                    help="Add the quantile GBM (A.1/A.2/A.3) to the backtest"
-                        " model list. Requires lightgbm; implies --backtest.")
+                        " model list. Implies --backtest.")
+    p.add_argument("--report", action="store_true",
+                   help="Write a self-contained HTML performance report "
+                        "(SVG charts, no plotting library) from the "
+                        "backtest, plus the alert summary when --detect "
+                        "also runs. Implies --backtest.")
+    p.add_argument("--detect", action="store_true",
+                   help="Run the A.4 detector (interval exceedance, CUSUM "
+                        "drift, job robust-z, attribution health) over the "
+                        "backtest ledgers and snapshot; implies --backtest. "
+                        "Preserves triage statuses from an existing "
+                        "alerts.parquet.")
     args = p.parse_args(argv)
 
     if args.extract:
@@ -245,7 +293,7 @@ def main(argv=None) -> int:
     _print_report(result)
     print(f"Frames written to {Path(snapshot_dir) / 'frames'}")
 
-    if args.gbm:
+    if args.gbm or args.detect or args.report:
         args.backtest = True
     if args.ml_frames or args.backtest:
         ml = build_ml_frames(snapshot_dir)
@@ -261,6 +309,31 @@ def main(argv=None) -> int:
         bt = backtest_baselines(ml, include_gbm=args.gbm)
         _write_backtests(bt, Path(snapshot_dir) / "frames")
         _print_backtests(bt)
+
+    if args.detect:
+        tables = transform.load_snapshot(snapshot_dir)
+        alerts_path = Path(snapshot_dir) / "frames" / "alerts.parquet"
+        previous = (pd.read_parquet(alerts_path)
+                    if alerts_path.exists() else None)
+        alerts = run_detector_on_backtests(bt, ml, tables,
+                                           previous_alerts=previous)
+        alerts_path.parent.mkdir(parents=True, exist_ok=True)
+        alerts.to_parquet(alerts_path, index=False)
+        n_by = alerts.groupby(["layer", "severity"], observed=True) \
+            .size().to_dict() if len(alerts) else {}
+        print(f"\nA.4 DETECTOR: {len(alerts)} alerts -> {alerts_path}")
+        for (layer, sev), n in sorted(n_by.items()):
+            print(f"  {layer:<14} {sev:<7} {n}")
+        if len(alerts):
+            print("top of the triage queue:")
+            for _, a in alerts.head(3).iterrows():
+                print(f"  [{a['severity']}] {a['run_date']} {a['message']}")
+
+    if args.report:
+        rp = Path(snapshot_dir) / "frames" / "backtest_report.html"
+        report.write_report(rp, bt,
+                            alerts=alerts if args.detect else None)
+        print(f"\nHTML report -> {rp}")
     return 0
 
 
