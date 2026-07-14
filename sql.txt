@@ -392,3 +392,56 @@ LIMIT 20;
 
 SELECT COUNT(DISTINCT subscription_id) FROM cat.raw_cost WHERE run_date >= DATE '2025-06-01';
 
+WITH per_write AS (
+    SELECT
+        run_date, subscription_id, resource_group_name, resource_type,
+        meter, batch_account_name, pool_name,
+        update_time,
+        sum(cost) AS cost_at_write        -- sum in case grain is still finer
+    FROM cat.raw_cost
+    GROUP BY 1,2,3,4,5,6,7,8
+)
+SELECT
+    run_date, subscription_id, resource_group_name, resource_type,
+    meter, batch_account_name, pool_name,
+    count(DISTINCT update_time)              AS writes,
+    count(DISTINCT round(cost_at_write::numeric, 6)) AS distinct_cost_values,
+    min(cost_at_write)                       AS min_cost,
+    max(cost_at_write)                       AS max_cost,
+    max(cost_at_write) - min(cost_at_write)  AS cost_delta
+FROM per_write
+GROUP BY 1,2,3,4,5,6,7
+HAVING count(DISTINCT update_time) > 1
+ORDER BY abs(max(cost_at_write) - min(cost_at_write)) DESC
+LIMIT 100;
+
+
+WITH per_write AS (
+    SELECT
+        run_date, subscription_id, resource_group_name, resource_type,
+        meter, batch_account_name, pool_name,
+        update_time,
+        sum(cost) AS cost_at_write
+    FROM cat.raw_cost
+    GROUP BY 1,2,3,4,5,6,7,8
+),
+changed AS (
+    SELECT
+        run_date, subscription_id, resource_group_name, resource_type,
+        meter, batch_account_name, pool_name,
+        max(cost_at_write) - min(cost_at_write) AS cost_delta
+    FROM per_write
+    GROUP BY 1,2,3,4,5,6,7
+    HAVING count(DISTINCT cost_at_write) > 1
+)
+SELECT
+    date_trunc('month', run_date) AS run_month,
+    count(*)                       AS rows_rewritten,
+    sum(abs(cost_delta))           AS total_abs_cost_moved
+FROM changed
+GROUP BY 1
+ORDER BY 1;
+
+
+
+
