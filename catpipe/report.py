@@ -137,11 +137,16 @@ def build_report(
         s = summary.dropna(subset=["mae_daily"])
         out.append(bar_chart(s["model"].tolist(), s["mae_daily"].tolist(),
                              "Daily MAE by model (lower is better)"))
-        if "monthly_pct_err" in s:
+        if "monthly_pct_err_estate" in s:
             out.append(bar_chart(
-                s["model"].tolist(), s["monthly_pct_err"].tolist(),
-                "Monthly aggregate error (the incumbent-comparison number)",
+                s["model"].tolist(), s["monthly_pct_err_estate"].tolist(),
+                "Estate monthly error (the incumbent-comparison number)",
                 pct=True))
+        if "monthly_wape" in s:
+            out.append(bar_chart(
+                s["model"].tolist(), s["monthly_wape"].tolist(),
+                "Monthly WAPE, spend-weighted (attribution accuracy: "
+                "offsetting errors do not cancel)", pct=True))
         if "coverage_90" in s:
             out.append(bar_chart(
                 s["model"].tolist(), s["coverage_90"].tolist(),

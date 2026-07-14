@@ -99,7 +99,7 @@ product, so it cannot dishonestly start in 2023 for a gated model.
 
 ## What the tests cover
 
-`pytest tests/` — 171 tests. The ones that matter:
+`pytest tests/` — 174 tests. The ones that matter:
 
 - **Concurrency sweep** — overlap, sequential, instantaneous handover (no
   false peak), independent pools, null-time drop, triple overlap.
@@ -175,8 +175,13 @@ additionally masked to unknown_pct <= 0.20. Baselines FREEZE AT THE ORIGIN
 empirical intervals from their own in-training residuals, so the harness is
 quantile-shaped before any GBM exists. An origin whose training window would
 predate the frame's honest regime is refused with an error, never silently
-accepted. Metrics per model: daily MAE, monthly aggregate percentage error
-(the stakeholder number), pinball loss at 5/50/95, and 5–95 interval
+accepted. Metrics per model: daily MAE; THREE monthly errors answering three
+questions — monthly_pct_err_estate (|sum of all predictions - sum of all
+actuals| per month: what finance sees, the incumbent-comparison number),
+monthly_wape (spend-weighted absolute error: attribution accuracy, where
+offsetting group errors do not cancel), and monthly_pct_err (unweighted
+mean over group-month ratios: a small-group diagnostic that tiny pools
+inflate, never the headline); pinball loss at 5/50/95; and 5-95 interval
 coverage against the 0.90 target. Outputs: `backtest_summary.json` and one
 prediction ledger parquet per frame — keep the ledger, since metrics can be
 recomputed from it but not the reverse. Any future model that implements

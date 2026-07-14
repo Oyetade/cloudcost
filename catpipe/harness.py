@@ -195,8 +195,23 @@ def evaluate(ledger: pd.DataFrame,
                        group in a test month yields NaN — reported, not
                        hidden)
       mae_daily        mean |y - q50| on scored rows
-      monthly_pct_err  mean over (group, month) of
-                       |sum q50 - sum y| / sum y — the stakeholder number
+
+      Three monthly errors, three questions:
+      monthly_pct_err_estate  per month: |sum of ALL predictions - sum of
+                       ALL actuals| / total actuals, averaged over months.
+                       THE incumbent-comparison number: what finance sees
+                       when the estate's monthly bill lands. Offsetting
+                       group errors legitimately cancel here.
+      monthly_wape     spend-weighted: sum over (group, month) of
+                       |pred - actual|, divided by total actual spend.
+                       Attribution accuracy: offsetting errors do NOT
+                       cancel. The gap between this and the estate number
+                       is exactly how much the model relies on cancellation.
+      monthly_pct_err  unweighted mean over (group, month) ratios. A
+                       diagnostic for small groups — a tiny pool with a
+                       near-zero month inflates it enormously, so it must
+                       never be quoted as the headline (the 206% lesson).
+
       pinball_05/50/95 quantile losses
       coverage_90      share of actuals inside [q05, q95]; target 0.90.
                        Above target means intervals too wide to be useful,
@@ -216,6 +231,18 @@ def evaluate(ledger: pd.DataFrame,
             row["monthly_pct_err"] = float(
                 ((nonzero["p"] - nonzero["y"]).abs()
                  / nonzero["y"].abs()).mean()) if len(nonzero) else np.nan
+
+            estate = scored.groupby("origin", observed=True).agg(
+                y=("y_true", "sum"), p=("q50", "sum"))
+            nz = estate[estate["y"].abs() > 1e-9]
+            row["monthly_pct_err_estate"] = float(
+                ((nz["p"] - nz["y"]).abs()
+                 / nz["y"].abs()).mean()) if len(nz) else np.nan
+
+            total_y = float(monthly["y"].abs().sum())
+            row["monthly_wape"] = float(
+                (monthly["p"] - monthly["y"]).abs().sum() / total_y
+            ) if total_y > 1e-9 else np.nan
             row["pinball_05"] = pinball_loss(scored["y_true"],
                                              scored["q05"], 0.05)
             row["pinball_50"] = pinball_loss(scored["y_true"],

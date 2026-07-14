@@ -237,3 +237,46 @@ class TestEndToEnd:
         assert summary.iloc[0]["mae_daily"] == pytest.approx(0.0, abs=1e-9)
         got = ledger.groupby("grp")["q50"].first()
         assert got["a"] == 100.0 and got["b"] == 500.0
+
+
+class TestMonthlyErrorVariants:
+    def _ledger(self, rows):
+        df = pd.DataFrame(rows)
+        df["model"] = "m"
+        df["run_date"] = date(2025, 1, 15)
+        df["origin"] = date(2025, 1, 1)
+        for q in ("q05", "q95"):
+            df[q] = df["q50"]
+        return df
+
+    def test_offsetting_errors_cancel_at_estate_not_in_wape(self):
+        # two groups, equal and opposite 10% errors: finance sees a perfect
+        # month (estate 0), attribution sees 10% misallocated (wape 0.10)
+        led = self._ledger([
+            dict(grp="a", y_true=100.0, q50=110.0),
+            dict(grp="b", y_true=100.0, q50=90.0),
+        ])
+        e = H.evaluate(led, group_keys=["grp"]).iloc[0]
+        assert e["monthly_pct_err_estate"] == pytest.approx(0.0)
+        assert e["monthly_wape"] == pytest.approx(0.10)
+        assert e["monthly_pct_err"] == pytest.approx(0.10)
+
+    def test_tiny_group_inflates_only_the_unweighted_mean(self):
+        # the 206% lesson in miniature: a 1000-spend pool at 1% error and
+        # a 1-spend pool at 100% error. The unweighted mean screams 50.5%;
+        # the numbers finance and attribution care about both say ~1%.
+        led = self._ledger([
+            dict(grp="big", y_true=1000.0, q50=1010.0),
+            dict(grp="tiny", y_true=1.0, q50=2.0),
+        ])
+        e = H.evaluate(led, group_keys=["grp"]).iloc[0]
+        assert e["monthly_pct_err"] == pytest.approx(0.505)
+        assert e["monthly_wape"] == pytest.approx(11.0 / 1001.0)
+        assert e["monthly_pct_err_estate"] == pytest.approx(11.0 / 1001.0)
+
+    def test_single_group_all_three_agree(self):
+        led = self._ledger([dict(grp="a", y_true=200.0, q50=210.0)])
+        e = H.evaluate(led, group_keys=["grp"]).iloc[0]
+        assert e["monthly_pct_err"] == pytest.approx(0.05)
+        assert e["monthly_wape"] == pytest.approx(0.05)
+        assert e["monthly_pct_err_estate"] == pytest.approx(0.05)

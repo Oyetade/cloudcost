@@ -167,7 +167,8 @@ def _print_backtests(bt: dict) -> None:
             print(f"  {name}: not scoreable -- {res['error']}")
             continue
         print(f"  {name}:")
-        cols = ["model", "mae_daily", "monthly_pct_err", "coverage_90"]
+        cols = ["model", "mae_daily", "monthly_pct_err_estate",
+                "monthly_wape", "coverage_90"]
         print(res["summary"][cols].to_string(index=False))
 
 
