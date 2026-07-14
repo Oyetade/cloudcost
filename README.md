@@ -99,7 +99,7 @@ product, so it cannot dishonestly start in 2023 for a gated model.
 
 ## What the tests cover
 
-`pytest tests/` — 174 tests. The ones that matter:
+`pytest tests/` — 177 tests. The ones that matter:
 
 - **Concurrency sweep** — overlap, sequential, instantaneous handover (no
   false peak), independent pools, null-time drop, triple overlap.
@@ -179,10 +179,12 @@ accepted. Metrics per model: daily MAE; THREE monthly errors answering three
 questions — monthly_pct_err_estate (|sum of all predictions - sum of all
 actuals| per month: what finance sees, the incumbent-comparison number),
 monthly_wape (spend-weighted absolute error: attribution accuracy, where
-offsetting group errors do not cancel), and monthly_pct_err (unweighted
-mean over group-month ratios: a small-group diagnostic that tiny pools
-inflate, never the headline); pinball loss at 5/50/95; and 5-95 interval
-coverage against the 0.90 target. Outputs: `backtest_summary.json` and one
+offsetting group errors do not cancel), monthly_bias (SIGNED estate error:
+which way the model misses and whether the miss is one-signed — the
+asinh-median signature), and monthly_pct_err (unweighted mean over
+group-month ratios: a small-group diagnostic that tiny pools inflate,
+never the headline); pinball loss at 5/50/95; and 5-95 interval coverage
+against the 0.90 target. Outputs: `backtest_summary.json` and one
 prediction ledger parquet per frame — keep the ledger, since metrics can be
 recomputed from it but not the reverse. Any future model that implements
 fit / predict-quantiles runs through the identical folds.
@@ -254,13 +256,29 @@ penny alerts. Attribution health: days whose unknown_pct (frame 2's column)
 exceeds 20% alert regardless of totals, because the completeness gate is
 blind to attribution failure.
 
-Every alert has a stable alert_id, severity, human-readable message and a
-STATUS column from day one; merge_alert_status preserves triage states
+Every alert has a stable alert_id, a currency IMPACT, severity, a
+human-readable message and a STATUS column from day one. Severity is
+impact-aware: the statistical score sets the ceiling and the currency
+impact caps it (below impact_medium the alert is low, below impact_high at
+most medium — DetectorConfig knobs), because a robust-z of +25 on a job
+whose profile moved by six pounds must not outrank a pool breach worth
+thousands; the triage sort is severity, then impact, then recency.
+`--detect-days N` (default 30) scores only the trailing window — the
+nightly view — while 0 replays the full history as the detector's own
+back-test; merge_alert_status preserves triage states
 ('expected', 'investigating', ...) across re-scores, because an alert table
 nobody can triage decays into noise within a month. Injected-anomaly
 validation: spike caught same-day by both L1 and CUSUM; glide first alarmed
 7 days after onset; 1 false CUSUM alarm in 300 stationary days; L1
 normal-period escape rate 8.7% against the 10% design.
+
+## Experiments
+
+`experiments/transform_experiment.py <snapshot_dir>` runs the asinh-bias
+diagnosis: the same GBM on the same folds under asinh, log1p and no target
+transform, seasonal naive alongside as the unbiased reference, verdict by
+smallest |monthly_bias| per frame. Use it to choose each frame's transform
+from live evidence rather than by default.
 
 ## Not yet built (deliberately)
 

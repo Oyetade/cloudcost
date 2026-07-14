@@ -89,6 +89,7 @@ def _write_ml_frames(ml: dict, out_dir: Path) -> None:
         manifest[name] = {
             "rows": len(frame),
             "target": frame.attrs.get("target"),
+            "group_keys": frame.attrs.get("group_keys"),
             "feature_cols": frame.attrs.get("feature_cols"),
             "categorical_cols": frame.attrs.get("categorical_cols"),
             "train_origin": frame.attrs.get("train_origin"),
@@ -168,7 +169,7 @@ def _print_backtests(bt: dict) -> None:
             continue
         print(f"  {name}:")
         cols = ["model", "mae_daily", "monthly_pct_err_estate",
-                "monthly_wape", "coverage_90"]
+                "monthly_bias", "monthly_wape", "coverage_90"]
         print(res["summary"][cols].to_string(index=False))
 
 
@@ -178,7 +179,8 @@ LEDGER_PREFERENCE = ("quantile_gbm", "rolling_median_28",
 
 def run_detector_on_backtests(bt: dict, ml: dict,
                               tables: dict,
-                              previous_alerts=None):
+                              previous_alerts=None,
+                              detect_days: int | None = None):
     """A.4 assembled from what already exists. Layers 1 and 1.5 replay over
     the backtest prediction ledgers — RAW model intervals, because Layer 1
     computes its own trailing conformal margins per scored day (the
@@ -200,11 +202,23 @@ def run_detector_on_backtests(bt: dict, ml: dict,
             continue
         gk = ml[name].attrs.get("group_keys")
         ledgers[name] = (led[led["model"] == model].copy(), gk)
+
+    # scoring window: the trailing detect_days of the data, so a scheduled
+    # run produces the nightly view rather than a full-history replay
+    # (74,586-alert lesson). detect_days=None replays everything, which is
+    # the detector's own back-test mode.
+    score_from = None
+    if detect_days is not None and ledgers:
+        last = max(pd.to_datetime(led["run_date"]).max()
+                   for led, _ in ledgers.values())
+        score_from = (last - pd.Timedelta(days=detect_days - 1)).date()
+
     return detector.run_detector(
         ledgers,
         job_cost=tables.get("job_cost"),
         frame_2=ml.get("frame_2"),
         previous_alerts=previous_alerts,
+        score_from=score_from,
     )
 
 
@@ -260,6 +274,10 @@ def main(argv=None) -> int:
                         "(SVG charts, no plotting library) from the "
                         "backtest, plus the alert summary when --detect "
                         "also runs. Implies --backtest.")
+    p.add_argument("--detect-days", type=int, default=30, metavar="N",
+                   help="Detector scoring window: alert on the trailing N "
+                        "days only (default 30). 0 replays the full "
+                        "history — the detector's own back-test mode.")
     p.add_argument("--detect", action="store_true",
                    help="Run the A.4 detector (interval exceedance, CUSUM "
                         "drift, job robust-z, attribution health) over the "
@@ -316,8 +334,9 @@ def main(argv=None) -> int:
         alerts_path = Path(snapshot_dir) / "frames" / "alerts.parquet"
         previous = (pd.read_parquet(alerts_path)
                     if alerts_path.exists() else None)
-        alerts = run_detector_on_backtests(bt, ml, tables,
-                                           previous_alerts=previous)
+        alerts = run_detector_on_backtests(
+            bt, ml, tables, previous_alerts=previous,
+            detect_days=args.detect_days or None)
         alerts_path.parent.mkdir(parents=True, exist_ok=True)
         alerts.to_parquet(alerts_path, index=False)
         n_by = alerts.groupby(["layer", "severity"], observed=True) \

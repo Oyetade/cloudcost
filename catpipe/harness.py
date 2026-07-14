@@ -207,6 +207,12 @@ def evaluate(ledger: pd.DataFrame,
                        Attribution accuracy: offsetting errors do NOT
                        cancel. The gap between this and the estate number
                        is exactly how much the model relies on cancellation.
+      monthly_bias     SIGNED estate error: mean over months of
+                       (sum predictions - sum actuals) / actuals. Negative
+                       means the model systematically under-forecasts the
+                       monthly total (the asinh-median signature); the
+                       absolute estate error above says how big the miss
+                       is, this says which way and whether it is one-signed.
       monthly_pct_err  unweighted mean over (group, month) ratios. A
                        diagnostic for small groups — a tiny pool with a
                        near-zero month inflates it enormously, so it must
@@ -237,6 +243,9 @@ def evaluate(ledger: pd.DataFrame,
             nz = estate[estate["y"].abs() > 1e-9]
             row["monthly_pct_err_estate"] = float(
                 ((nz["p"] - nz["y"]).abs()
+                 / nz["y"].abs()).mean()) if len(nz) else np.nan
+            row["monthly_bias"] = float(
+                ((nz["p"] - nz["y"])
                  / nz["y"].abs()).mean()) if len(nz) else np.nan
 
             total_y = float(monthly["y"].abs().sum())

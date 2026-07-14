@@ -280,3 +280,20 @@ class TestMonthlyErrorVariants:
         assert e["monthly_pct_err"] == pytest.approx(0.05)
         assert e["monthly_wape"] == pytest.approx(0.05)
         assert e["monthly_pct_err_estate"] == pytest.approx(0.05)
+
+    def test_signed_bias_shows_direction_and_cancels_when_unbiased(self):
+        # biased-low model: bias negative, magnitude = estate error
+        low = self._ledger([
+            dict(grp="a", y_true=100.0, q50=90.0),
+            dict(grp="b", y_true=100.0, q50=95.0),
+        ])
+        e = H.evaluate(low, group_keys=["grp"]).iloc[0]
+        assert e["monthly_bias"] == pytest.approx(-0.075)
+        assert e["monthly_pct_err_estate"] == pytest.approx(0.075)
+        # unbiased offsetting model: bias zero while wape is not
+        off = self._ledger([
+            dict(grp="a", y_true=100.0, q50=110.0),
+            dict(grp="b", y_true=100.0, q50=90.0),
+        ])
+        e = H.evaluate(off, group_keys=["grp"]).iloc[0]
+        assert e["monthly_bias"] == pytest.approx(0.0)

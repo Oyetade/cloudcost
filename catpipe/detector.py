@@ -58,8 +58,8 @@ MAD_SCALE = 1.4826  # MAD -> sigma under normality
 
 ALERT_COLUMNS = [
     "alert_id", "run_date", "layer", "scope", "metric", "observed",
-    "expected", "lo", "hi", "score", "direction", "severity", "message",
-    "status",
+    "expected", "lo", "hi", "score", "impact", "direction", "severity",
+    "message", "status",
 ]
 
 
@@ -80,6 +80,12 @@ class DetectorConfig:
     min_job_history: int = 10            # below: new-job alert instead
     job_abs_floor: float = 5.0           # suppress penny alerts (currency)
     unknown_pct_threshold: float = 0.20  # the A.3/A.4 attribution rule
+    # impact caps (currency): a statistically screaming but monetarily
+    # trivial deviation must not outrank a pool breach worth thousands.
+    # Below impact_medium the severity caps at low; below impact_high it
+    # caps at medium. Tune to the estate's scale via triage feedback.
+    impact_medium: float = 50.0
+    impact_high: float = 500.0
 
 
 # ---------------------------------------------------------------------------
@@ -95,16 +101,29 @@ def _scope(row, group_keys: list[str]) -> str:
     return ";".join(f"{k}={row[k]}" for k in group_keys)
 
 
-def _severity(score: float) -> str:
-    """One monotone mapping for every layer: score is 'how far past the
-    line', in the layer's own dimensionless units (scaled exceedance,
-    CUSUM overshoot / h, |z| / threshold - 1).
+def _severity(score: float, impact: float | None = None,
+              config: DetectorConfig | None = None) -> str:
+    """Statistical score sets the ceiling; monetary impact caps it. Score
+    is 'how far past the line' in the layer's own dimensionless units
+    (scaled exceedance, CUSUM overshoot / h, |z| / threshold - 1); impact
+    is the deviation in currency. A robust-z of +25 on a job whose profile
+    moved by six pounds is real but must sit below a pool breach worth
+    thousands — severity ranks the triage queue, and triage time is the
+    scarce resource. Layers without a currency impact (attribution) pass
+    impact=None and rank on score alone.
     """
     if score >= 1.0:
-        return "high"
-    if score >= 0.25:
-        return "medium"
-    return "low"
+        sev = "high"
+    elif score >= 0.25:
+        sev = "medium"
+    else:
+        sev = "low"
+    if impact is not None and config is not None:
+        if impact < config.impact_medium:
+            sev = "low"
+        elif impact < config.impact_high and sev == "high":
+            sev = "medium"
+    return sev
 
 
 def _mk_alerts(rows: list[dict]) -> pd.DataFrame:
@@ -191,7 +210,9 @@ def layer1_interval_alerts(
                 metric="daily_cost", observed=float(r["y_true"]),
                 expected=float(r["q50"]), lo=float(r["q05"]),
                 hi=float(r["q95"]), score=float(score),
-                direction=direction, severity=_severity(score),
+                impact=float(exceed),
+                direction=direction,
+                severity=_severity(score, exceed, config),
                 message=(f"{scope}: actual {r['y_true']:.2f} {direction} the "
                          f"calibrated {int(config.target_coverage*100)}% band "
                          f"[{r['q05']:.2f}, {r['q95']:.2f}] "
@@ -247,12 +268,14 @@ def layer15_cusum_alerts(
                 scope = ";".join(f"{k}={v}"
                                  for k, v in zip(group_keys, keys))
                 score = (stat - config.cusum_h) / config.cusum_h
+                impact = float(abs(resid[i]))
                 rows.append(dict(
                     run_date=dates[i], layer="L1.5_cusum", scope=scope,
                     metric="residual_drift", observed=float(resid[i]),
                     expected=0.0, lo=np.nan, hi=np.nan,
-                    score=float(score), direction=direction,
-                    severity=_severity(score),
+                    score=float(score), impact=impact,
+                    direction=direction,
+                    severity=_severity(score, impact, config),
                     message=(f"{scope}: sustained {direction}-forecast drift; "
                              f"CUSUM {stat:.1f} exceeded h={config.cusum_h} "
                              f"(sigma {sigma:.2f}). Glide-type change: no "
@@ -305,8 +328,8 @@ def layer2_job_alerts(
                         run_date=d, layer="L2_job", scope=scope,
                         metric="new_job", observed=float(costs[i]),
                         expected=np.nan, lo=np.nan, hi=np.nan,
-                        score=0.0, direction="new",
-                        severity="low",
+                        score=0.0, impact=float(costs[i]),
+                        direction="new", severity="low",
                         message=(f"{scope}: first appearance, cost "
                                  f"{costs[i]:.2f}. No profile yet."),
                     ))
@@ -326,8 +349,9 @@ def layer2_job_alerts(
                 run_date=d, layer="L2_job", scope=scope,
                 metric="job_daily_cost", observed=float(costs[i]),
                 expected=med, lo=np.nan, hi=np.nan,
-                score=float(score), direction=direction,
-                severity=_severity(score),
+                score=float(score), impact=float(abs(dev)),
+                direction=direction,
+                severity=_severity(score, abs(dev), config),
                 message=(f"{scope}: cost {costs[i]:.2f} vs profile median "
                          f"{med:.2f} (robust z = {z:+.1f}, threshold "
                          f"{config.z_threshold:.0f})"),
@@ -360,7 +384,7 @@ def attribution_alerts(
             run_date=r["run_date"], layer="attribution", scope="estate",
             metric="unknown_pct", observed=float(r["unknown_pct"]),
             expected=config.unknown_pct_threshold, lo=np.nan, hi=np.nan,
-            score=float(score), direction="above",
+            score=float(score), impact=np.nan, direction="above",
             severity=_severity(score),
             message=(f"{r['unknown_pct']:.0%} of attributed cost sits in "
                      "Unknown/NULL team (threshold "
@@ -421,7 +445,8 @@ def run_detector(
     table = pd.concat(pieces, ignore_index=True)
     table = merge_alert_status(table, previous_alerts)
     sev_rank = table["severity"].map({"high": 0, "medium": 1, "low": 2})
-    table = (table.assign(_s=sev_rank)
-             .sort_values(["_s", "run_date"], ascending=[True, False])
-             .drop(columns="_s").reset_index(drop=True))
+    table = (table.assign(_s=sev_rank, _i=table["impact"].fillna(-1.0))
+             .sort_values(["_s", "_i", "run_date"],
+                          ascending=[True, False, False])
+             .drop(columns=["_s", "_i"]).reset_index(drop=True))
     return table

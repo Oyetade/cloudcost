@@ -38,7 +38,9 @@ def _ledger(days=200, sigma=10.0, level=100.0, grp="a", seed=1,
 class TestLayer1:
     def test_spike_alerts_normal_days_mostly_do_not(self):
         led = _ledger(days=200)
-        led.loc[led.index[-1], "y_true"] = 100.0 + 12 * 10.0  # 12-sigma day
+        # 70-sigma day: statistically AND monetarily large (impact ~ 680,
+        # above the impact_high cap), so severity high is earned twice over
+        led.loc[led.index[-1], "y_true"] = 100.0 + 70 * 10.0
         alerts = D.layer1_interval_alerts(led, ["grp"])
         last = alerts[alerts["run_date"] == led["run_date"].iloc[-1]]
         assert len(last) == 1
@@ -66,6 +68,19 @@ class TestLayer1:
         early = spiked_alerts[
             spiked_alerts["run_date"] <= led["run_date"].iloc[-1]]
         assert set(early["alert_id"]) == set(base_alerts["alert_id"])
+
+    def test_statistically_loud_but_monetarily_trivial_caps_at_low(self):
+        # a razor-thin band around a tiny cost: a 6-unit deviation is many
+        # interval-widths (huge score) but far below impact_medium, so the
+        # impact cap holds it at low — the FVA_RMT-at-8-pounds lesson
+        led = _ledger(days=200, sigma=0.5, level=10.0)
+        led.loc[led.index[-1], "y_true"] = 16.0
+        alerts = D.layer1_interval_alerts(led, ["grp"])
+        last = alerts[alerts["run_date"] == led["run_date"].iloc[-1]]
+        assert len(last) == 1
+        assert last.iloc[0]["score"] > 1.0        # statistically screaming
+        assert last.iloc[0]["severity"] == "low"  # monetarily trivial
+        assert last.iloc[0]["impact"] < 50.0
 
     def test_score_from_limits_replay(self):
         led = _ledger(days=100)
@@ -206,3 +221,25 @@ class TestAlertTable:
         table = D.run_detector({})
         assert len(table) == 0
         assert list(table.columns) == D.ALERT_COLUMNS
+
+
+class TestScoreFromAcrossLayers:
+    def test_run_detector_score_from_filters_every_layer(self):
+        led = _ledger(days=200)
+        led.loc[led.index[-1], "y_true"] = 800.0
+        jc = pd.DataFrame([
+            dict(run_date=date(2025, 1, 1) + timedelta(days=i),
+                 subscription_id="s1", batch_account_name="a",
+                 pool_name="p", job_id=f"j{i}", job_name="BT",
+                 job_team="T", cost=c)
+            for i, c in enumerate([100.0] * 30 + [5000.0])
+        ])
+        f2 = pd.DataFrame({
+            "run_date": [date(2025, 1, 10), date(2025, 6, 1)],
+            "unknown_pct": [0.9, 0.9],
+        })
+        cutoff = date(2025, 1, 25)
+        table = D.run_detector({"f": (led, ["grp"])}, job_cost=jc,
+                               frame_2=f2, score_from=cutoff)
+        assert len(table)
+        assert (pd.to_datetime(table["run_date"]).dt.date >= cutoff).all()
