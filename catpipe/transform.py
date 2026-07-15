@@ -42,6 +42,37 @@ JOB_KEYS = ["run_date", "subscription_id", "batch_account_name",
             "pool_name", "job_id"]
 POOL_KEYS = ["run_date", "subscription_id", "batch_account_name", "pool_name"]
 
+# The batch-account sentinel (Q23, 14 July 2026). pool_name not-null is the
+# batch-branch filter, but batch_account_name can still be null on those rows:
+# pool-named lines exist on non-Batch resource types (vmss, disks,
+# operationalinsights). pandas groupby defaults to dropna=True, so those rows
+# are filtered IN and then silently grouped OUT, and the pool branch under-sums
+# by exactly their cost. That is what broke assert_partition_identity by
+# 17,585.93 with no candidate mechanism in the data: the leak was a groupby
+# default, not a dropped row upstream.
+#
+# Filling before grouping, rather than passing dropna=False, keeps the null
+# explicit and distinct in the key — the same discipline __NULL_TEAM__ enforces
+# end to end (section 5). dropna=False would leave NaN group keys that compare
+# unequal to themselves and poison every downstream merge on POOL_KEYS.
+NULL_BATCH = "__NULL_BATCH__"
+
+
+def batch_slice(raw_cost: pd.DataFrame) -> pd.DataFrame:
+    """The batch branch of raw_cost: pool_name not null, with a null-safe
+    batch_account_name. Every batch-branch aggregation goes through here, so
+    the partition identity holds by construction rather than by each caller
+    remembering the sentinel.
+    """
+    batch = raw_cost[raw_cost["pool_name"].notna()].copy()
+    if "batch_account_name" in batch.columns:
+        col = batch["batch_account_name"]
+        if isinstance(col.dtype, pd.CategoricalDtype):
+            if NULL_BATCH not in col.cat.categories:
+                col = col.cat.add_categories([NULL_BATCH])
+        batch["batch_account_name"] = col.fillna(NULL_BATCH)
+    return batch
+
 
 def stamp_regime(frame: pd.DataFrame) -> pd.DataFrame:
     """Stamp each row with its data_regime (section 5.7), so the model layer
@@ -220,9 +251,9 @@ def daily_cost_by_pool(raw_cost: pd.DataFrame) -> pd.DataFrame:
     1a). Batch-associated rows only (pool_name not null); the non-pool
     residual is handled separately (product 1b).
     """
-    batch = raw_cost[raw_cost["pool_name"].notna()].copy()
+    batch = batch_slice(raw_cost)
     agg = (
-        batch.groupby(POOL_KEYS, observed=True)["pre_tax_cost"]
+        batch.groupby(POOL_KEYS, observed=True, dropna=False)["pre_tax_cost"]
         .sum()
         .rename("cost")
         .reset_index()

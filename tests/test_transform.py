@@ -326,3 +326,79 @@ class TestBatchSliceDuplicateCheck:
                 ["run_date", "subscription_id", "resource_group_name",
                  "resource_type", "meter", "batch_account_name", "pool_name"],
                 "raw_cost[batch]")
+
+
+# --- Q23: the null batch_account_name leak (14 July 2026) -------------------
+#
+# pool_name not-null is the batch-branch filter, but batch_account_name can be
+# null on those rows. groupby's dropna=True default then deleted them AFTER the
+# filter admitted them, so the pool branch under-summed and
+# assert_partition_identity failed by 17,585.93 on the live snapshot with no
+# candidate mechanism visible in the data itself.
+
+def _raw_cost_with_null_batch():
+    """Two pool rows: one with a batch account, one without. The second is the
+    row the groupby default used to swallow.
+    """
+    return pd.DataFrame({
+        "run_date": [date(2026, 1, 1), date(2026, 1, 1), date(2026, 1, 1)],
+        "subscription_id": ["sub-1", "sub-1", "sub-1"],
+        "resource_group_name": ["rg-a", "rg-b", "rg-c"],
+        "resource_type": ["microsoft.batch/batchaccounts",
+                          "microsoft.compute/virtualmachinescalesets",
+                          "microsoft.storage/storageaccounts"],
+        "meter": ["F32s v2", "F32s v2", "Read Operations"],
+        "batch_account_name": ["ba-1", None, None],
+        "pool_name": ["pool-1", "pool-2", None],
+        "pre_tax_cost": [100.0, 17.5, 3.0],
+    })
+
+
+def test_daily_cost_by_pool_keeps_null_batch_account_rows():
+    raw = _raw_cost_with_null_batch()
+    agg = T.daily_cost_by_pool(raw)
+
+    # 117.5 = both pool rows. Before the fix this returned 100.0: the
+    # null-batch row was filtered in and grouped out.
+    assert agg["cost"].sum() == pytest.approx(117.5)
+    assert len(agg) == 2
+    assert T.NULL_BATCH in set(agg["batch_account_name"])
+
+
+def test_partition_identity_holds_with_null_batch_account():
+    """The end-to-end invariant that actually broke: pool + non-pool must
+    reconstruct the raw_cost grand total.
+    """
+    raw = _raw_cost_with_null_batch()
+    pool_total = float(T.daily_cost_by_pool(raw)["cost"].sum())
+    non_pool_total = float(raw[raw["pool_name"].isna()]["pre_tax_cost"].sum())
+
+    A.assert_partition_identity(
+        {"pool_branch": pool_total, "non_pool_branch": non_pool_total},
+        float(raw["pre_tax_cost"].sum()),
+        "test: pool + non-pool vs grand total",
+    )
+
+
+def test_batch_slice_never_drops_a_pool_row():
+    """The sentinel is the contract: every pool_name-not-null row survives,
+    and no null survives in a key column.
+    """
+    raw = _raw_cost_with_null_batch()
+    batch = T.batch_slice(raw)
+
+    assert len(batch) == 2
+    assert batch["batch_account_name"].notna().all()
+    assert batch["pre_tax_cost"].sum() == pytest.approx(117.5)
+
+
+def test_batch_slice_handles_categorical_batch_account():
+    """extract.py keeps key columns as plain strings, but a categorical must
+    not blow up on fillna with an unseen category.
+    """
+    raw = _raw_cost_with_null_batch()
+    raw["batch_account_name"] = raw["batch_account_name"].astype("category")
+    batch = T.batch_slice(raw)
+
+    assert batch["batch_account_name"].notna().all()
+    assert T.NULL_BATCH in set(batch["batch_account_name"])

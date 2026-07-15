@@ -38,6 +38,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from . import transform as T
+
 # Pool-day grain. batch_account_name + pool_name identify the pool; the join
 # to activity elsewhere uses the same key.
 POOL_DAY_KEYS = ["run_date", "subscription_id", "batch_account_name",
@@ -50,9 +52,9 @@ def _batch_raw_cost_by_pool_day(raw_cost: pd.DataFrame) -> pd.DataFrame:
     only ever covers batch jobs, so raw_cost must be filtered to the same
     scope before comparing, else raw_cost is trivially larger.
     """
-    batch = raw_cost[raw_cost["pool_name"].notna()]
+    batch = T.batch_slice(raw_cost)
     return (
-        batch.groupby(POOL_DAY_KEYS, observed=True)["pre_tax_cost"]
+        batch.groupby(POOL_DAY_KEYS, observed=True, dropna=False)["pre_tax_cost"]
         .sum()
         .rename("raw_cost")
         .reset_index()
