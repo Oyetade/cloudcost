@@ -528,6 +528,106 @@ WHERE subscription_id IN (
 
 
 
+Here is the Q27 test. The logic: if PREPROD falls back to dedicated when spot is scarce, cost rises while volume holds. If PREPROD waits for spot like dev, volume falls with cost. Those two signatures are cleanly distinguishable.
+1. The core test: volume against cost across the alert windows.
+SELECT
+    r.run_date,
+    round(r.day_cost::numeric, 2)                        AS day_cost,
+    a.task_count,
+    a.job_seconds,
+    round((r.day_cost / NULLIF(a.job_seconds, 0))::numeric, 6) AS cost_per_job_second
+FROM (
+    SELECT run_date, sum(pre_tax_cost) AS day_cost
+    FROM cat.raw_cost
+    WHERE subscription_id = 'b14759de-5826-4d7f-84d0-b00bf51a1d57'
+      AND pool_name IS NOT NULL
+      AND run_date BETWEEN DATE '2026-05-15' AND DATE '2026-06-30'
+    GROUP BY 1
+) r
+LEFT JOIN (
+    SELECT run_date,
+           sum(task_count)  AS task_count,
+           sum(job_seconds) AS job_seconds
+    FROM cat.job_usage
+    WHERE subscription_id = 'b14759de-5826-4d7f-84d0-b00bf51a1d57'
+      AND run_date BETWEEN DATE '2026-05-15' AND DATE '2026-06-30'
+    GROUP BY 1
+) a USING (run_date)
+ORDER BY r.run_date;
+
+he window brackets both alerts (2026-06-05 and 2026-06-15) with three weeks of prior baseline. cost_per_job_second is the discriminator, and it's essentially effective_price_drift computed by hand: it isolates unit price from volume.
+Verdict rule: if cost_per_job_second climbs across the alert dates while job_seconds stays flat, that is the dedicated fallback engaging. Same work, higher unit price. PREPROD behaves like PROD, stays in the estate, and the CUSUM alerts are measuring spot scarcity rather than a cost problem. If instead job_seconds collapses and cost follows it down, preprod waits for spot like dev and belongs in EXCLUDED_TIERS.
+Note the join assumes job_usage carries subscription_id and run_date at that grain. Your five-key join in transform.py suggests it does, but if the column names differ, adjust.
+2. The zero-day signature, which is the cleaner tier-level test.
+
+SELECT
+    e.environment_tier,
+    count(*)                                          AS sub_days,
+    count(*) FILTER (WHERE d.day_cost = 0)            AS zero_days,
+    round(100.0 * count(*) FILTER (WHERE d.day_cost = 0)
+          / NULLIF(count(*), 0), 2)                   AS pct_zero_days
+FROM (
+    SELECT subscription_id, run_date, sum(pre_tax_cost) AS day_cost
+    FROM cat.raw_cost
+    WHERE pool_name IS NOT NULL
+      AND run_date >= DATE '2025-02-01'
+    GROUP BY 1, 2
+) d
+JOIN cat.environment_config e USING (subscription_id)
+GROUP BY 1
+ORDER BY 1;
+
+SELECT
+    e.environment_tier,
+    count(*)                                          AS sub_days,
+    count(*) FILTER (WHERE d.day_cost = 0)            AS zero_days,
+    round(100.0 * count(*) FILTER (WHERE d.day_cost = 0)
+          / NULLIF(count(*), 0), 2)                   AS pct_zero_days
+FROM (
+    SELECT subscription_id, run_date, sum(pre_tax_cost) AS day_cost
+    FROM cat.raw_cost
+    WHERE pool_name IS NOT NULL
+      AND run_date >= DATE '2025-02-01'
+    GROUP BY 1, 2
+) d
+JOIN cat.environment_config e USING (subscription_id)
+GROUP BY 1
+ORDER BY 1;
+
+This is the population-level version of the same question, restricted to post-glide history. Dev-like tiers should show a materially higher pct_zero_days than PROD, because "no spot capacity" means "nothing ran". If PREPROD's zero-day rate sits near PROD's, it has a fallback.
+Caveat worth naming: this only sees days where a row exists at all. A subscription-day with no raw_cost row is absent, not zero, so pct_zero_days undercounts. Your pad_daily handles that distinction properly in the pipeline via the gate; raw SQL doesn't. Read it as a lower bound and compare tiers relative to each other rather than trusting the absolute figure.
+3. Direct evidence, if the column carries it.
+Your schema tree showed a low_priority_type column on raw_cost, and every row in the Q24 screenshots had it NULL. If that column distinguishes spot from dedicated billing, it answers Q27 outright without inference:
+
+SELECT
+    e.environment_tier,
+    r.low_priority_type,
+    count(*)                             AS rows,
+    round(sum(r.pre_tax_cost)::numeric, 2) AS total_cost
+FROM cat.raw_cost r
+JOIN cat.environment_config e USING (subscription_id)
+WHERE r.pool_name IS NOT NULL
+  AND r.run_date >= DATE '2025-02-01'
+GROUP BY 1, 2
+ORDER BY 1, 4 DESC;
+
+
+
+If PREPROD shows a mix of spot and dedicated rows, the fallback is real and visible in the billing data itself. That would settle Q27 in one query, and it would be far better evidence than a correlation across two alert dates. I'd run this one first: it's the cheapest, and if low_priority_type means what its name suggests, everything else is confirmation.
+One thing to hold onto: if query 3 works, it also gives you a feature. A daily spot-versus-dedicated cost share per pool would be a direct observation of the fallback engaging, and unlike the spot market itself, it's in your data. That could matter for frame_1a, where the GBM currently loses to seasonal naive.
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
