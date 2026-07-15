@@ -152,7 +152,8 @@ class QuantileGBM:
 
         self._cat_levels = {}
         X = self._matrix(train, fit=True)
-        y = fwd(train[spec.target].astype(float).to_numpy())
+        y_raw = train[spec.target].astype(float).to_numpy()
+        y = fwd(y_raw)
 
         # chronological tail for early stopping; never a random split
         dates = pd.to_datetime(train[spec.date_col])
@@ -164,36 +165,53 @@ class QuantileGBM:
         self._boosters = {}
         for q in self.quantiles:
             params = dict(self.params, objective="quantile", alpha=q)
-            if use_valid:
-                dtrain = lgb.Dataset(X[~valid_mask], label=y[~valid_mask],
-                                     categorical_feature=self.categoricals)
-                dvalid = lgb.Dataset(X[valid_mask], label=y[valid_mask],
-                                     reference=dtrain,
-                                     categorical_feature=self.categoricals)
-                booster = lgb.train(
-                    params, dtrain,
-                    num_boost_round=self.num_boost_round,
-                    valid_sets=[dvalid],
-                    callbacks=[lgb.early_stopping(self.early_stopping_rounds,
-                                                  verbose=False),
-                               lgb.log_evaluation(0)],
-                )
-                # refit on the FULL window at the stopped round, so the
-                # tail's information is not thrown away at predict time
-                booster = lgb.train(
-                    params,
-                    lgb.Dataset(X, label=y,
-                                categorical_feature=self.categoricals),
-                    num_boost_round=max(booster.best_iteration, 1),
-                )
-            else:
-                booster = lgb.train(
-                    params,
-                    lgb.Dataset(X, label=y,
-                                categorical_feature=self.categoricals),
-                    num_boost_round=300,
-                )
-            self._boosters[q] = booster
+            self._boosters[q] = self._train_one(
+                params, X, y, valid_mask, use_valid)
+
+        # The mean booster (7.3 / 5.4, added 15 July 2026). Quantiles invert
+        # exactly under a monotone transform, so q50 IS the daily median: that
+        # part was never wrong. The bias was downstream, in the SUM. For a
+        # right-skewed daily cost the median sits below the mean, so summing
+        # daily medians under-forecasts a monthly total, one-signed, with no
+        # cancellation: exactly the estate ~ wape ~ |bias| ~ -0.28 signature
+        # on frames 1a and 2. This booster is trained on the UNTRANSFORMED
+        # target with an L2 objective, so it estimates E[y|x] directly and
+        # sums to an unbiased monthly total. It does not touch q05/q50/q95:
+        # the intervals and their conformal calibration are unchanged.
+        self._mean_booster = self._train_one(
+            dict(self.params, objective="regression"),
+            X, y_raw, valid_mask, use_valid)
+
+    def _train_one(self, params, X, y, valid_mask, use_valid):
+        """Early stopping on a chronological tail, then refit on the full
+        window at the stopped round, so the tail's information is not thrown
+        away at predict time. Shared by the quantile and mean objectives so
+        they cannot drift apart.
+        """
+        if use_valid:
+            dtrain = lgb.Dataset(X[~valid_mask], label=y[~valid_mask],
+                                 categorical_feature=self.categoricals)
+            dvalid = lgb.Dataset(X[valid_mask], label=y[valid_mask],
+                                 reference=dtrain,
+                                 categorical_feature=self.categoricals)
+            booster = lgb.train(
+                params, dtrain,
+                num_boost_round=self.num_boost_round,
+                valid_sets=[dvalid],
+                callbacks=[lgb.early_stopping(self.early_stopping_rounds,
+                                              verbose=False),
+                           lgb.log_evaluation(0)],
+            )
+            return lgb.train(
+                params,
+                lgb.Dataset(X, label=y, categorical_feature=self.categoricals),
+                num_boost_round=max(booster.best_iteration, 1),
+            )
+        return lgb.train(
+            params,
+            lgb.Dataset(X, label=y, categorical_feature=self.categoricals),
+            num_boost_round=300,
+        )
 
     def predict(self, test: pd.DataFrame, spec: FrameSpec) -> pd.DataFrame:
         _, inv = _TRANSFORMS[self.transform]
@@ -212,6 +230,14 @@ class QuantileGBM:
             out[f"q{int(round(q * 100)):02d}"] = vals[:, i]
         cols = [f"q{int(round(q * 100)):02d}" for q in self.quantiles]
         out[cols] = out[cols].clip(lower=0)  # cost is non-negative
+
+        # pred_mean is trained on the RAW target, so it is NOT inverted: it is
+        # already on the cost scale. This is the column to sum for a monthly
+        # total; q50 remains the daily median and the honest thing to report
+        # for a single day.
+        if getattr(self, "_mean_booster", None) is not None:
+            out["pred_mean"] = np.clip(
+                self._mean_booster.predict(X), 0, None)
         return out
 
     def feature_importance(self) -> pd.DataFrame:

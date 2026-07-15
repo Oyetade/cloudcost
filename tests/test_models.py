@@ -154,3 +154,86 @@ class TestHarnessIntegration:
             lambda m: set(zip(m["run_date"], m["origin"])),
             include_groups=False)
         assert len(set(map(frozenset, per_model))) == 1
+
+
+# --- 5.4 / 7.3: the monthly summation bias (15 July 2026) -------------------
+#
+# Quantiles invert exactly under a monotone transform, so q50 is genuinely the
+# daily median. The bias was never in the inversion: it was in the SUM. For a
+# right-skewed daily cost, median < mean, so summing daily medians
+# under-forecasts the monthly total, one-signed, with no cancellation. That is
+# the estate ~ wape ~ |bias| ~ -0.28 signature seen on frames 1a and 2.
+
+def _skewed_frame(n_days=240, seed=0):
+    """A right-skewed daily cost series with a weekday/weekend swing, which is
+    the shape the live pool frames actually have.
+    """
+    rng = np.random.default_rng(seed)
+    dates = pd.date_range("2025-01-01", periods=n_days, freq="D")
+    dow = dates.dayofweek.to_numpy()
+    weekend = dow >= 5
+    base = np.where(weekend, 20.0, 400.0)
+    cost = base * rng.lognormal(mean=0.0, sigma=0.8, size=n_days)
+    return pd.DataFrame({
+        "run_date": dates,
+        "pool_name": pd.Categorical(["pool-1"] * n_days),
+        "dow": dow.astype(float),
+        "is_weekend": weekend.astype(float),
+        "lag_1": np.concatenate([[base[0]], cost[:-1]]),
+        "cost": cost,
+    })
+
+
+def test_pred_mean_is_emitted_and_is_not_the_median():
+    frame = _skewed_frame()
+    spec = H.FrameSpec(target="cost", date_col="run_date",
+                     group_keys=["pool_name"])
+    model = M.QuantileGBM(features=["dow", "is_weekend", "lag_1", "pool_name"],
+                        categoricals=["pool_name"])
+    model.fit(frame, spec)
+    preds = model.predict(frame, spec)
+
+    assert "pred_mean" in preds.columns
+    assert preds["pred_mean"].notna().all()
+    assert (preds["pred_mean"] >= 0).all()
+    # on a right-skewed target the mean must sit ABOVE the median in aggregate
+    assert preds["pred_mean"].sum() > preds["q50"].sum()
+
+
+def test_summing_pred_mean_beats_summing_medians_on_skewed_target():
+    """THE regression test for the -0.28 bias: the whole point of the mean
+    booster is that its SUM tracks the true total while the median's does not.
+    """
+    frame = _skewed_frame()
+    spec = H.FrameSpec(target="cost", date_col="run_date",
+                     group_keys=["pool_name"])
+    model = M.QuantileGBM(features=["dow", "is_weekend", "lag_1", "pool_name"],
+                        categoricals=["pool_name"])
+    model.fit(frame, spec)
+    preds = model.predict(frame, spec)
+
+    truth = frame["cost"].sum()
+    bias_median = (preds["q50"].sum() - truth) / truth
+    bias_mean = (preds["pred_mean"].sum() - truth) / truth
+
+    # the median sum under-forecasts, one-signed
+    assert bias_median < -0.05
+    # the mean sum is materially closer to unbiased
+    assert abs(bias_mean) < abs(bias_median)
+
+
+def test_pred_mean_does_not_disturb_the_quantiles():
+    """The intervals and their conformal calibration must be unchanged: this
+    fix is additive, not a re-parameterisation.
+    """
+    frame = _skewed_frame()
+    spec = H.FrameSpec(target="cost", date_col="run_date",
+                     group_keys=["pool_name"])
+    model = M.QuantileGBM(features=["dow", "is_weekend", "lag_1", "pool_name"],
+                        categoricals=["pool_name"])
+    model.fit(frame, spec)
+    preds = model.predict(frame, spec)
+
+    # non-crossing still holds
+    assert (preds["q05"] <= preds["q50"] + 1e-9).all()
+    assert (preds["q50"] <= preds["q95"] + 1e-9).all()

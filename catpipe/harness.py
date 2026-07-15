@@ -230,16 +230,29 @@ def evaluate(ledger: pd.DataFrame,
         if len(scored):
             row["mae_daily"] = float(
                 (scored["y_true"] - scored["q50"]).abs().mean())
+
+            # Monthly totals sum the MEAN, not the median (5.4). Summing daily
+            # medians of a right-skewed target under-forecasts the total,
+            # one-signed: that was the -0.28 estate bias on 1a. Models that
+            # emit pred_mean get it; baselines that only emit q50 fall back,
+            # which keeps the comparison honest rather than silently scoring
+            # two different quantities under one column name.
+            pcol = ("pred_mean"
+                    if "pred_mean" in scored.columns
+                    and scored["pred_mean"].notna().any()
+                    else "q50")
+            row["point_col"] = pcol
+
             agg_keys = (group_keys or []) + ["origin"]
             monthly = scored.groupby(agg_keys, observed=True).agg(
-                y=("y_true", "sum"), p=("q50", "sum"))
+                y=("y_true", "sum"), p=(pcol, "sum"))
             nonzero = monthly[monthly["y"].abs() > 1e-9]
             row["monthly_pct_err"] = float(
                 ((nonzero["p"] - nonzero["y"]).abs()
                  / nonzero["y"].abs()).mean()) if len(nonzero) else np.nan
 
             estate = scored.groupby("origin", observed=True).agg(
-                y=("y_true", "sum"), p=("q50", "sum"))
+                y=("y_true", "sum"), p=(pcol, "sum"))
             nz = estate[estate["y"].abs() > 1e-9]
             row["monthly_pct_err_estate"] = float(
                 ((nz["p"] - nz["y"]).abs()
