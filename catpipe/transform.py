@@ -110,13 +110,90 @@ def drop_pre_coverage(frame: pd.DataFrame) -> pd.DataFrame:
     return frame[frame["data_regime"] != "pre_coverage"].copy()
 
 
-def load_snapshot(snapshot_dir: str | Path) -> dict[str, pd.DataFrame]:
-    """Read every table Parquet in a snapshot directory into a dict."""
+def load_snapshot(
+    snapshot_dir: str | Path, filter_tiers: bool = True
+) -> dict[str, pd.DataFrame]:
+    """Read every table Parquet in a snapshot directory into a dict.
+
+    DEV and TEST tiers are dropped at the gate by default (see
+    filter_environment_tiers). Pass filter_tiers=False to load the raw estate,
+    which the reconciliation to invoice needs: the invoice bills every tier, so
+    a like-for-like comparison must not pre-filter.
+    """
     d = Path(snapshot_dir)
     tables = {}
     for p in d.glob("*.parquet"):
         tables[p.stem] = pd.read_parquet(p)
+    if filter_tiers:
+        tables = filter_environment_tiers(tables)
     return tables
+
+
+EXCLUDED_TIERS = ("DEV", "TEST")
+
+
+def filter_environment_tiers(
+    tables: dict[str, pd.DataFrame],
+    excluded_tiers: tuple[str, ...] = EXCLUDED_TIERS,
+) -> dict[str, pd.DataFrame]:
+    """Drop excluded environment tiers from EVERY table, at the gate, before
+    any aggregation or assertion sees the data (register Q26, SME guidance 14
+    July 2026).
+
+    Why here and not at enrichment: enrich_environment runs at step 5 of the
+    frame builders, after the partition identity is asserted against
+    raw_cost's grand total and after lags and rolling windows are computed.
+    Filtering there would (a) reopen Q23 by shrinking the branches while the
+    grand total kept the excluded rows, (b) leak DEV history into PROD
+    features through the rolling windows, and (c) leave the excluded rows in
+    every other table. The universe has to be narrowed once, at the top, so
+    that grand total, branches, activity and gate all agree on what exists.
+
+    Why DEV and TEST are excluded on principle, not just on instruction: from
+    December 2024 the estate runs hybrid pools, spot-first with a dedicated
+    fallback. DEV and TEST have no fallback: when spot capacity is
+    unavailable nothing runs and the cost is zero, because their consumers
+    will simply wait for capacity. Their daily cost is therefore a
+    spot-AVAILABILITY series driven by Azure's auction, which nothing in this
+    snapshot observes. No feature in raw_cost or job_usage could predict it.
+    Excluding an exogenously-driven target is a modelling decision the charter
+    can defend, not a convenience.
+
+    PROD and PREPROD are what remain. PROD's dedicated fallback is confirmed,
+    so its work always happens and its cost is forecastable from the features
+    here. PREPROD is NOT confirmed either way (register Q27): if preprod
+    consumers also wait for spot rather than falling back, preprod carries the
+    same exogenous availability signal as DEV and belongs in EXCLUDED_TIERS.
+    It is kept for now because excluding a tier on a guess is the worse error:
+    a tier wrongly kept shows up as poor accuracy that can be diagnosed, while
+    a tier wrongly dropped is spend that silently leaves the estate.
+
+    environment_tier lives on environment_config keyed by subscription_id, so
+    this is a subscription-level exclusion: name-matching on resource groups
+    is not needed and would be brittle.
+
+    Tables without a subscription_id are passed through untouched. A tier that
+    is null (a subscription absent from environment_config) is KEPT: silence
+    in the config is not evidence of DEV, and dropping unknowns would quietly
+    shrink the estate.
+    """
+    cfg = tables.get("environment_config")
+    if cfg is None or "environment_tier" not in cfg.columns:
+        return tables
+
+    tier = cfg["environment_tier"].astype(str).str.strip().str.upper()
+    excluded = {t.strip().upper() for t in excluded_tiers}
+    drop_subs = set(cfg.loc[tier.isin(excluded), "subscription_id"])
+    if not drop_subs:
+        return tables
+
+    out = {}
+    for name, df in tables.items():
+        if "subscription_id" in df.columns:
+            out[name] = df[~df["subscription_id"].isin(drop_subs)].copy()
+        else:
+            out[name] = df
+    return out
 
 
 def build_gate(run_status: pd.DataFrame) -> pd.DataFrame:

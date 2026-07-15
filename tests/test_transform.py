@@ -402,3 +402,113 @@ def test_batch_slice_handles_categorical_batch_account():
 
     assert batch["batch_account_name"].notna().all()
     assert T.NULL_BATCH in set(batch["batch_account_name"])
+
+
+# --- Q26: environment tier gate filter (14 July 2026) ----------------------
+#
+# DEV/TEST run spot-only with no dedicated fallback, so their daily cost is a
+# spot-AVAILABILITY series driven by Azure's auction: exogenous, unobserved by
+# any feature in the snapshot. The filter belongs at the gate, before the
+# partition identity is asserted and before any rolling window is computed.
+
+def _tiered_tables():
+    env = pd.DataFrame({
+        "subscription_id": ["sub-prod", "sub-dev", "sub-test", "sub-unknown"],
+        "subscription_name": ["neu-prod-01", "neu-dev-01", "neu-test-01",
+                              "neu-mystery-01"],
+        "environment_tier": ["PROD", "DEV", "TEST", None],
+        "environment_sub_tier": ["Primary", "Primary", "Primary", "Primary"],
+    })
+    raw = pd.DataFrame({
+        "run_date": [date(2026, 1, 1)] * 4,
+        "subscription_id": ["sub-prod", "sub-dev", "sub-test", "sub-unknown"],
+        "batch_account_name": ["ba-1", "ba-2", "ba-3", "ba-4"],
+        "pool_name": ["pool-1", "pool-2", "pool-3", "pool-4"],
+        "pre_tax_cost": [100.0, 50.0, 25.0, 7.0],
+    })
+    # a table with no subscription_id must pass through untouched
+    calendar = pd.DataFrame({"run_date": [date(2026, 1, 1)], "is_holiday": [False]})
+    return {"environment_config": env, "raw_cost": raw, "calendar": calendar}
+
+
+def test_filter_environment_tiers_drops_dev_and_test():
+    out = T.filter_environment_tiers(_tiered_tables())
+    subs = set(out["raw_cost"]["subscription_id"])
+
+    assert subs == {"sub-prod", "sub-unknown"}
+    assert out["raw_cost"]["pre_tax_cost"].sum() == pytest.approx(107.0)
+
+
+def test_filter_environment_tiers_keeps_null_tier():
+    """Silence in environment_config is not evidence of DEV. An unknown tier is
+    kept, so the estate cannot shrink by accident.
+    """
+    out = T.filter_environment_tiers(_tiered_tables())
+    assert "sub-unknown" in set(out["raw_cost"]["subscription_id"])
+
+
+def test_filter_environment_tiers_is_case_insensitive():
+    tables = _tiered_tables()
+    tables["environment_config"]["environment_tier"] = [
+        "Prod", " dev ", "test", None]
+    out = T.filter_environment_tiers(tables)
+    assert set(out["raw_cost"]["subscription_id"]) == {"sub-prod",
+                                                       "sub-unknown"}
+
+
+def test_filter_environment_tiers_passes_through_tables_without_subscription():
+    out = T.filter_environment_tiers(_tiered_tables())
+    assert len(out["calendar"]) == 1
+
+
+def test_filter_environment_tiers_keeps_preprod():
+    """PROD and PREPROD are the two tiers that remain. PREPROD's spot-fallback
+    behaviour is unconfirmed (register Q27); until it is, it stays in, so
+    environment_tier survives as a live two-level feature rather than a
+    degenerate one.
+    """
+    tables = _tiered_tables()
+    tables["environment_config"] = pd.concat([
+        tables["environment_config"],
+        pd.DataFrame([dict(subscription_id="sub-preprod",
+                           subscription_name="neu-preprod-01",
+                           environment_tier="PREPROD",
+                           environment_sub_tier="Primary")]),
+    ], ignore_index=True)
+    tables["raw_cost"] = pd.concat([
+        tables["raw_cost"],
+        pd.DataFrame([dict(run_date=date(2026, 1, 1),
+                           subscription_id="sub-preprod",
+                           batch_account_name="ba-5",
+                           pool_name="pool-5",
+                           pre_tax_cost=40.0)]),
+    ], ignore_index=True)
+
+    out = T.filter_environment_tiers(tables)
+    subs = set(out["raw_cost"]["subscription_id"])
+
+    assert "sub-preprod" in subs
+    assert subs == {"sub-prod", "sub-preprod", "sub-unknown"}
+    assert out["raw_cost"]["pre_tax_cost"].sum() == pytest.approx(147.0)
+
+
+def test_filter_environment_tiers_noop_without_config():
+    tables = {"raw_cost": _tiered_tables()["raw_cost"]}
+    out = T.filter_environment_tiers(tables)
+    assert len(out["raw_cost"]) == 4
+
+
+def test_partition_identity_holds_after_tier_filter():
+    """The reason the filter is at the gate: every table narrows together, so
+    the branches still reconstruct the grand total of the filtered universe.
+    """
+    out = T.filter_environment_tiers(_tiered_tables())
+    raw = out["raw_cost"]
+    pool_total = float(T.daily_cost_by_pool(raw)["cost"].sum())
+    non_pool_total = float(raw[raw["pool_name"].isna()]["pre_tax_cost"].sum())
+
+    A.assert_partition_identity(
+        {"pool_branch": pool_total, "non_pool_branch": non_pool_total},
+        float(raw["pre_tax_cost"].sum()),
+        "test: partition after tier filter",
+    )

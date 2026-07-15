@@ -518,6 +518,16 @@ WHERE pool_name IS NOT NULL
 
 
 
+SELECT subscription_id, environment_tier
+FROM cat.environment_config
+WHERE subscription_id IN (
+  '69e2a525-c4a1-4b66-948c-960dde594b60',  -- the Q22 rewrite cohort
+  'b14759de-5826-4d7f-84d0-b00bf51a1d57',  -- the two CUSUM glide alerts
+  '2920fda4-cf26-4ecb-8071-276957efa12f'   -- the £2,703 spike alert
+);
+
+
+
 
 
 
