@@ -510,6 +510,13 @@ HAVING abs(sum(pre_tax_cost)) > 1000
 ORDER BY total_cost DESC;
 
 
+SELECT count(*) AS rows,
+       round(sum(pre_tax_cost)::numeric, 2) AS dropped_cost
+FROM cat.raw_cost
+WHERE pool_name IS NOT NULL
+  AND batch_account_name IS NULL;
+
+
 
 
 
