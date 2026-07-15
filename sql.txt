@@ -442,6 +442,75 @@ FROM changed
 GROUP BY 1
 ORDER BY 1;
 
+histogram
+
+WITH per_write AS (
+    SELECT
+        run_date, subscription_id, resource_group_name, resource_type,
+        meter, batch_account_name, pool_name,
+        update_time,
+        sum(pre_tax_cost) AS cost_at_write
+    FROM cat.raw_cost
+    GROUP BY 1,2,3,4,5,6,7,8
+),
+changed AS (
+    SELECT
+        run_date,
+        max(cost_at_write) - min(cost_at_write) AS cost_delta
+    FROM per_write
+    GROUP BY 1,2,3,4,5,6,7
+    HAVING count(DISTINCT cost_at_write) > 1
+)
+SELECT
+    date_trunc('month', run_date) AS run_month,
+    count(*)                       AS rows_rewritten,
+    round(sum(cost_delta)::numeric, 2) AS total_cost_moved
+FROM changed
+GROUP BY 1
+ORDER BY 1;
+
+Does the naive null/not-null split actually balance?
+
+SELECT
+    CASE WHEN pool_name IS NULL THEN 'non_pool' ELSE 'pool' END AS branch,
+    count(*)                              AS rows,
+    round(sum(pre_tax_cost)::numeric, 2)  AS branch_cost
+FROM cat.raw_cost
+GROUP BY 1
+
+UNION ALL
+
+SELECT
+    'GRAND_TOTAL',
+    count(*),
+    round(sum(pre_tax_cost)::numeric, 2)
+FROM cat.raw_cost;
+
+
+2. Reproduce the actual assertion's universe.
+
+SELECT
+    round(sum(pre_tax_cost)::numeric, 2) AS grand_total,
+    count(*)                             AS rows,
+    min(run_date)                        AS first_date,
+    max(run_date)                        AS last_date
+FROM cat.raw_cost;
+
+3. The suspect list: rows that could fall between branches.
+
+SELECT
+    (pool_name IS NULL)           AS pool_null,
+    (batch_account_name IS NULL)  AS batch_null,
+    resource_type,
+    count(*)                              AS rows,
+    round(sum(pre_tax_cost)::numeric, 2)  AS total_cost
+FROM cat.raw_cost
+GROUP BY 1, 2, 3
+HAVING abs(sum(pre_tax_cost)) > 1000
+ORDER BY total_cost DESC;
+
+
+
 
 
 
