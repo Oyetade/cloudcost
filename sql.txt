@@ -616,7 +616,7 @@ ORDER BY 1, 4 DESC;
 If PREPROD shows a mix of spot and dedicated rows, the fallback is real and visible in the billing data itself. That would settle Q27 in one query, and it would be far better evidence than a correlation across two alert dates. I'd run this one first: it's the cheapest, and if low_priority_type means what its name suggests, everything else is confirmation.
 One thing to hold onto: if query 3 works, it also gives you a feature. A daily spot-versus-dedicated cost share per pool would be a direct observation of the fallback engaging, and unlike the spot market itself, it's in your data. That could matter for frame_1a, where the GBM currently loses to seasonal naive.
 
-
+print(f"DEBUG {name}: pred_mean present={'pred_mean' in scored.columns}, pcol={pcol}, n={len(scored)}")
 
 
 
