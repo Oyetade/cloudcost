@@ -122,30 +122,81 @@ def assert_partition_identity(
         )
 
 
+# The true row grain of raw_cost (registers Q24 and Q22, 14 July 2026).
+# Declared once and shared, because the previous drift between two hand-written
+# copies of this list IS Q24: assert_no_duplicates omitted meter_sub_category
+# and so flagged 142 legitimate Azure rows (Files vs Tables under Storage /
+# Read Operations) as duplicates of each other.
+RAW_COST_GRAIN = [
+    "run_date", "subscription_id", "resource_group_name", "resource_type",
+    "meter", "meter_sub_category", "batch_account_name", "pool_name",
+]
+
+
+def grain_present(df: pd.DataFrame, keys: list[str] | None = None) -> list[str]:
+    """RAW_COST_GRAIN restricted to the columns a frame actually carries.
+
+    The live extract has all eight. Narrower frames (and test fixtures) may
+    not, and a check that KeyErrors on a missing column is a check that gets
+    deleted rather than fixed. Narrowing the key can only make a duplicate
+    check STRICTER, never blinder, so this is safe in the direction that
+    matters: a frame without meter_sub_category simply reproduces the old
+    Q24 behaviour on that frame, and the live path — which has the column —
+    gets the corrected grain.
+    """
+    keys = keys if keys is not None else RAW_COST_GRAIN
+    return [k for k in keys if k in df.columns]
+
+
 def assert_one_write_per_slice(
     raw_cost: pd.DataFrame, context: str = "raw_cost",
-    keys: tuple[str, str] = ("run_date", "subscription_id"),
+    keys: list[str] | None = None,
     ts_col: str = "update_time",
 ) -> None:
-    """The append-only invariant (question register Q1, resolved 10 July
-    2026): every (run_date, subscription_id) slice of raw_cost has exactly
-    one update_time — one write, never rewritten. Back-tests being
-    point-in-time correct, and the detector needing no maturity rule, both
-    REST on this. The loader has upsert capability that has never fired;
-    this check is the tripwire for the day it does. Run it on every fresh
-    extract.
+    """The append-only invariant (question register Q1, falsified 14 July
+    2026): every ROW of raw_cost has exactly one update_time — one write,
+    never rewritten. Back-tests being point-in-time correct, and the detector
+    needing no maturity rule, both REST on this.
+
+    The grain matters, and getting it wrong was Q22's original sin. This check
+    keyed on (run_date, subscription_id) until 14 July 2026, which is not a
+    row: it is a coarse bucket holding thousands of rows across resource
+    groups, types, meters and sub-categories. A loader that writes a
+    subscription's cost lines at different moments — which every loader does —
+    produces many update_times per bucket with nothing rewritten at all. So
+    the old check conflated two unrelated things:
+
+      rewrite:      the same row written twice, different update_time. Q1.
+      many rows:    different rows, written at different times. Normal.
+
+    It could not tell them apart, so its count (829 unfiltered, 484 after the
+    DEV/TEST filter) was an upper bound of unknown tightness. Keying on the
+    full row grain removes the conflation: more than one update_time on one
+    ROW is a rewrite and nothing else.
+
+    dropna=False is not optional here. pandas' groupby drops null keys by
+    default, and batch_account_name, pool_name and meter_sub_category are all
+    nullable. Without it this check would go quiet on most of the estate and
+    look like it had passed: that silent-drop default is exactly what cost
+    17,585.93 in Q23.
     """
     if ts_col not in raw_cost.columns or raw_cost.empty:
         return
-    n_ts = raw_cost.groupby(list(keys), observed=True)[ts_col].nunique()
+    keys = list(keys) if keys is not None else RAW_COST_GRAIN
+    present = [k for k in keys if k in raw_cost.columns]
+    if not present:
+        return
+    n_ts = raw_cost.groupby(present, observed=True,
+                            dropna=False)[ts_col].nunique()
     rewritten = n_ts[n_ts > 1]
     if len(rewritten):
         sample = rewritten.head(3).index.tolist()
         raise DataQualityError(
-            f"{context}: {len(rewritten)} (run_date, subscription) slices "
-            f"carry more than one {ts_col} — the loader's upsert has fired "
-            f"and the append-only assumption (Q1) no longer holds. "
-            f"Point-in-time back-test claims are void until re-established. "
+            f"{context}: {len(rewritten)} rows of raw_cost carry more than "
+            f"one {ts_col} at the full grain ({', '.join(present)}) — the "
+            f"loader's upsert has fired and the append-only assumption (Q1) "
+            f"no longer holds. Point-in-time back-test claims are void for "
+            f"any origin whose feature window overlaps these rows. "
             f"Examples: {sample}"
         )
 

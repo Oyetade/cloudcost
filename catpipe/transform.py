@@ -359,12 +359,14 @@ def build_pool_frame(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     # all null-pool). Since daily_cost_by_pool uses only pool-not-null rows,
     # check exactly that slice. Non-batch raw_cost has its own grain and its
     # own duplicate check belongs with product 1b (the non-pool residual).
-    batch_slice = raw_cost[raw_cost["pool_name"].notna()]
-    A.assert_no_duplicates(batch_slice,
-                           ["run_date", "subscription_id",
-                            "resource_group_name", "resource_type",
-                            "meter", "batch_account_name",
-                            "pool_name"], "raw_cost[batch]")
+    # Q24 (14 July 2026): this key was hand-written and omitted
+    # meter_sub_category, so it flagged 142 legitimate Azure rows as
+    # duplicates: Storage/Read Operations billed separately for Files and
+    # Tables is two rows, not one row twice. Use the shared grain constant so
+    # the two checks cannot drift apart again.
+    batch_rows = raw_cost[raw_cost["pool_name"].notna()]
+    A.assert_no_duplicates(batch_rows, A.grain_present(batch_rows),
+                           "raw_cost[batch]")
 
     target = daily_cost_by_pool(raw_cost)
 
