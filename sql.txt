@@ -620,10 +620,20 @@ print(f"DEBUG {name}: pred_mean present={'pred_mean' in scored.columns}, pcol={p
 
 
 
+The feature-importance check is the one that's actually outstanding. Your models.py has feature_importance(), and its docstring says it exists as precisely this sanity check: that the model leans on activity and calendar rather than memorising pool identity.
+The problem is that walk_forward refits per origin and doesn't retain the model, so you need a fit outside the harness. In run_pipeline.py, after frame_1a is built:
 
 
+import catpipe.models as M
+from catpipe.baselines import spec_for_frame
 
-
+spec = spec_for_frame("1a")
+m = M.QuantileGBM.for_frame(frame_1a)
+m.fit(frame_1a[frame_1a["run_date"] < "2026-06-01"], spec)
+fi = m.feature_importance()
+print(fi.head(15).to_string(index=False))
+print(f"\npool_name share of total gain: "
+      f"{fi.loc[fi.feature == 'pool_name', 'gain'].sum() / fi.gain.sum():.1%}")
 
 
 
