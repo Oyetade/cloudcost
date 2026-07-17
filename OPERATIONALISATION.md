@@ -74,6 +74,34 @@ structural:
     python -m catpipe.score_pipeline --snapshot ./snapshots/<ts> \
         --bundle ./models/pool/v2026-08-01 --ledger ./ledger --frame pool
 
+## Additions after the frame_1a feature list
+
+Two behaviours added once the real 40-feature list was visible (19 of them
+share_*_lag1 pivot columns):
+
+**Pivot reconciliation** (`persistence.reindex_pivot_features`, wired into
+`LoadedModel.predict`). The job-mix pivot only creates a column per category
+observed in the window, so a quiet fortnight with no Audit jobs produces a
+frame with no `share_Audit_lag1` at all. The card now declares
+`zero_fill_prefixes=["share_"]`; a card-listed feature under a declared
+prefix that is absent from the inference frame is filled with 0.0 (absence
+of the category and a zero share are the same fact, and a test proves the
+predictions are identical), while any other missing feature still refuses.
+The mirror case, a NEW category's column appearing since training, is
+reported in the manifest as `novel_pivot_columns`, the column-space
+equivalent of an unseen pool level. Set `zero_fill_prefixes` when building
+the card; without it, behaviour is unchanged.
+
+**Card-level leakage assertion** (`persistence.assert_no_unlagged_features`).
+`assertions.assert_no_same_day_cost` only catches literal cost columns; the
+charter's rule covers same-day activity too. This checks the card's
+feature_names against the frame's columns: any feature whose lagged twin
+exists in the frame (job_seconds vs job_seconds_lag1, share_Audit vs
+share_Audit_lag1, price_drift vs price_drift_lag1) is a same-day observation
+arriving through a side door, and raises. Calendar and static columns have
+no lagged twins and pass. Call it at card-build time, before save_bundle;
+the real frame_1a list passes it as-is.
+
 ## Deliberately not decided here
 
 Retraining cadence and authority, the staleness rule under the migration,

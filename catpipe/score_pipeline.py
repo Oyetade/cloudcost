@@ -179,6 +179,8 @@ def score_snapshot(
     except PersistenceError as exc:
         return abort(f"predict refused: {exc}")
     unseen = preds.attrs.get("unseen_level_counts", {})
+    pivot_report = preds.attrs.get("pivot_report",
+                                   {"zero_filled": [], "novel_pivot_columns": []})
 
     # 7. ledger, watermark, manifest
     out = pd.concat(
@@ -196,6 +198,7 @@ def score_snapshot(
         rows_scored=int(len(out)),
         max_run_date=str(max_rd.date()),
         unseen_level_counts=unseen,
+        pivot_report=pivot_report,
         point_col=card.point_col,
         ledger_file=str(ledger_file),
     )

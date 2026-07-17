@@ -17,7 +17,8 @@ from catpipe.persistence import (
     BoosterSpec, ModelCard, frame_dtypes, freeze_levels,
 )
 
-FEATURES = ["cost_lag1", "cost_lag7", "cost_roll28", "dow", "pool_name"]
+FEATURES = ["cost_lag1", "cost_lag7", "cost_roll28",
+            "share_Audit_lag1", "share_Risk_lag1", "dow", "pool_name"]
 CATEGORICALS = ["pool_name"]
 GROUP_KEYS = ["subscription_id", "batch_account_name", "pool_name"]
 TARGET = "cost"
@@ -86,6 +87,10 @@ def write_snapshot(tables: dict[str, pd.DataFrame], out_dir) -> None:
         df.to_parquet(out_dir / f"{name}.parquet", index=False)
 
 
+def g_apply(df, col):
+    return df.groupby(GROUP_KEYS, observed=True)[col].shift(1)
+
+
 def featurize_pool(frame: pd.DataFrame) -> pd.DataFrame:
     """Mini feature factory: lags/rolls per pool, shifted-then-rolled so
     day t is outside its own window, calendar lead. Stand-in for the local
@@ -99,8 +104,16 @@ def featurize_pool(frame: pd.DataFrame) -> pd.DataFrame:
         lambda s: s.shift(1).rolling(28, min_periods=28).mean()
     )
     df["dow"] = pd.to_datetime(df["run_date"]).dt.dayofweek.astype("int64")
+    # share pivot stand-in: two categories, deterministic split, lagged.
+    # Mirrors job_mix_by_pool_day's per-category share columns.
+    df["share_Audit"] = 0.6
+    df["share_Risk"] = 0.4
+    df["share_Audit_lag1"] = g_apply(df, "share_Audit")
+    df["share_Risk_lag1"] = g_apply(df, "share_Risk")
     df["pool_name"] = df["pool_name"].astype("category")
-    return df.dropna(subset=["cost_lag1", "cost_lag7", "cost_roll28"]).reset_index(drop=True)
+    drop = ["cost_lag1", "cost_lag7", "cost_roll28",
+            "share_Audit_lag1", "share_Risk_lag1"]
+    return df.dropna(subset=drop).reset_index(drop=True)
 
 
 def fit_boosters(frame: pd.DataFrame, seed: int = 7):
@@ -145,5 +158,6 @@ def make_card(featured: pd.DataFrame, frame_name: str = "pool") -> ModelCard:
         train_end="2026-04-30",
         snapshot="test-fixture",
         horizon_days=1,
+        zero_fill_prefixes=["share_"],
         seed=7,
     )

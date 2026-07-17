@@ -40,6 +40,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -109,6 +110,16 @@ class ModelCard:
     horizon_days: int
     filter_tiers: bool = False                # local tree's load_snapshot flag
     excluded_tiers: list[str] = field(default_factory=list)
+    zero_fill_prefixes: list[str] = field(default_factory=list)
+    # Prefixes (e.g. "share_") whose card-listed features may legitimately be
+    # ABSENT from an inference frame: the job-mix pivot only creates a column
+    # per category observed in the window, so a quiet fortnight with no Audit
+    # jobs has no share_Audit_lag1 column at all. For these, and only these,
+    # a missing feature is filled with 0.0 (the true value of an unobserved
+    # category's share) rather than refused. Anything else missing still
+    # raises. Novel pivot columns in the frame that the card does not list
+    # are the mirror case (a NEW category appeared) and are counted for the
+    # manifest, never silently absorbed.
     schema: str = ""                          # filled by save_bundle
     created_at: str = ""
     git_sha: str = ""
@@ -175,6 +186,78 @@ def apply_frozen_levels(
             )
         out[col] = pd.Categorical(as_str.where(~unseen_mask), categories=allowed)
     return out, unseen_counts
+
+
+_LAGGED_FORM = re.compile(r".*_(lag|roll(ing)?)_?\d+$")
+
+
+def assert_no_unlagged_features(
+    feature_names: Sequence[str],
+    frame_columns: Sequence[str],
+    target: str,
+) -> None:
+    """The charter's leakage rule, enforced against the CARD rather than the
+    frame: no same-day cost or activity feature enters any model.
+
+    The frame legitimately carries unlagged columns (job_seconds,
+    peak_concurrency, the share_* family, price_drift): they are the raw
+    material the lags are built from. The leak is one of them appearing in
+    feature_names. assertions.assert_no_same_day_cost only catches literal
+    cost columns; this catches the activity side too, by construction: a
+    feature is an unlagged twin if the frame also carries a _lag{n} version
+    of it, because the factory only lags columns that are same-day
+    observations. Calendar and static columns have no lagged twins and pass
+    untouched. Call at card-build time, before save_bundle.
+    """
+    cols = set(frame_columns)
+    offenders = []
+    for f in feature_names:
+        if f == target or f in ("cost", "pre_tax_cost"):
+            offenders.append(f)
+            continue
+        if _LAGGED_FORM.match(f):
+            continue  # already a lagged/rolled form
+        if any(c != f and c.startswith(f + "_lag") for c in cols):
+            offenders.append(f)
+    if offenders:
+        raise PersistenceError(
+            f"unlagged same-day features in the card: {offenders}. These are "
+            "the target or its same-day correlates arriving through a side "
+            "door; only their _lag/_roll forms may enter feature_names."
+        )
+
+
+def reindex_pivot_features(
+    frame: pd.DataFrame, card: ModelCard
+) -> tuple[pd.DataFrame, dict[str, list[str]]]:
+    """Reconcile pivot-created feature columns between training and inference.
+
+    Two directions, both driven by card.zero_fill_prefixes:
+      - a card feature absent from the frame (category not observed in the
+        window): added as 0.0, its true value, and reported;
+      - a frame column matching a prefix that the card does NOT list (a NEW
+        category appeared since training): reported for the manifest. It is
+        not fed to the model regardless (X selects card features only), but
+        a new job category is a scoping signal the run must surface, the
+        column-space mirror of an unseen pool level.
+    """
+    added: list[str] = []
+    novel: list[str] = []
+    if not card.zero_fill_prefixes:
+        return frame, {"zero_filled": added, "novel_pivot_columns": novel}
+    out = frame
+    prefixes = tuple(card.zero_fill_prefixes)
+    for f in card.feature_names:
+        if f.startswith(prefixes) and f not in out.columns:
+            if out is frame:
+                out = frame.copy()
+            out[f] = 0.0
+            added.append(f)
+    card_set = set(card.feature_names)
+    for c in out.columns:
+        if c.startswith(prefixes) and _LAGGED_FORM.match(c) and c not in card_set:
+            novel.append(c)
+    return out, {"zero_filled": added, "novel_pivot_columns": sorted(novel)}
 
 
 def assert_schema(frame: pd.DataFrame, card: ModelCard) -> None:
@@ -286,7 +369,8 @@ class LoadedModel:
         margins where present. Output carries point_col and the unseen-level
         counts in attrs for the run manifest.
         """
-        recoded, unseen = apply_frozen_levels(frame, self.card)
+        filled, pivot_report = reindex_pivot_features(frame, self.card)
+        recoded, unseen = apply_frozen_levels(filled, self.card)
         assert_schema(recoded, self.card)
         self._check_novel_nulls(recoded)
 
@@ -310,6 +394,7 @@ class LoadedModel:
             out = self._apply_margins(out, recoded)
 
         out.attrs["unseen_level_counts"] = unseen
+        out.attrs["pivot_report"] = pivot_report
         out.attrs["point_col"] = self.card.point_col
         return out
 
