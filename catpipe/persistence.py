@@ -369,12 +369,7 @@ class LoadedModel:
         margins where present. Output carries point_col and the unseen-level
         counts in attrs for the run manifest.
         """
-        filled, pivot_report = reindex_pivot_features(frame, self.card)
-        recoded, unseen = apply_frozen_levels(filled, self.card)
-        assert_schema(recoded, self.card)
-        self._check_novel_nulls(recoded)
-
-        X = recoded.loc[:, self.card.feature_names]
+        X, recoded, unseen, pivot_report = self.design_matrix(frame)
         out = pd.DataFrame(index=frame.index)
         for spec in self.card.boosters:
             raw = self.boosters[spec.name].predict(X)
@@ -397,6 +392,19 @@ class LoadedModel:
         out.attrs["pivot_report"] = pivot_report
         out.attrs["point_col"] = self.card.point_col
         return out
+
+    def design_matrix(self, frame: pd.DataFrame):
+        """The exact matrix predict() scores: pivot columns reconciled,
+        frozen levels applied, schema asserted, never-null checked, features
+        selected in card order. Public so explanation tooling (per-alert
+        pred_contrib) is guaranteed to attribute the same matrix the model
+        scored, never a re-derived one."""
+        filled, pivot_report = reindex_pivot_features(frame, self.card)
+        recoded, unseen = apply_frozen_levels(filled, self.card)
+        assert_schema(recoded, self.card)
+        self._check_novel_nulls(recoded)
+        X = recoded.loc[:, self.card.feature_names]
+        return X, recoded, unseen, pivot_report
 
     def _check_novel_nulls(self, frame: pd.DataFrame) -> None:
         """A lag column null at inference means the history window did not

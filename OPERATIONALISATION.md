@@ -102,6 +102,35 @@ arriving through a side door, and raises. Calendar and static columns have
 no lagged twins and pass. Call it at card-build time, before save_bundle;
 the real frame_1a list passes it as-is.
 
+## Closing the Copilot-identified gap (D7/O9, per-alert attribution, Explain)
+
+Two further modules close the review's "not found" items:
+
+**`catpipe/change_decomposition.py`** answers "why cost changed:
+price/usage/scope". Bennet (midpoint) decomposition per meter between two
+periods: exactly additive, price_effect + usage_effect + scope_effect +
+unpriced_effect = delta to the penny, asserted per item and in total in the
+assertions.py spirit. Entering/exiting meters are scope; cost with zero
+recorded usage in both periods is labelled unpriced, never hidden.
+`day_vs_baseline` gives the per-alert view (one group's day against its
+trailing per-day baseline) and `team_contribution` gives the team half of
+the M4 wording (each team's delta versus its own baseline, shares summing
+to the group change). No model, no ML: accounting arithmetic on raw_cost
+and job_cost as extracted.
+
+**`catpipe/explain.py`** joins the two halves per alert. MODEL half:
+`local_attribution` uses LightGBM's pred_contrib (TreeSHAP) on the mean
+booster only, so contributions read in pounds and sum exactly to pred_mean
+(asserted per row); the quantile boosters' contributions live on the asinh
+scale and are deliberately not reported. Attribution runs on
+`LoadedModel.design_matrix`, the same matrix predict() scores, so the
+explanation can never attribute a different matrix than the model saw.
+BUSINESS half: the decomposition above. `explain_event` returns the
+EVENT EXPLAIN structure (which meter drove it, how much was price/usage/
+scope, which features drove this prediction, team contribution) and
+`format_explanation` renders the plain-text block for the report; the HTML
+report wiring is the remaining step, in the local tree's report module.
+
 ## Deliberately not decided here
 
 Retraining cadence and authority, the staleness rule under the migration,
